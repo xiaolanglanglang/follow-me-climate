@@ -1,0 +1,11 @@
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/

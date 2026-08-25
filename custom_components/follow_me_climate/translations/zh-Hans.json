@@ -1,0 +1,79 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Follow-Me Climate 随身感",
+                "description": "以参考传感器（人所在位置）的温度为准，闭环微调空调设定温度，而不是相信空调自带传感器。",
+                "data": {
+                    "name": "名称",
+                    "climate_entity": "空调（climate 实体）",
+                    "reference_sensor": "参考温度传感器",
+                    "target_temperature": "目标温度",
+                    "step": "调节步长（°C）",
+                    "adjust_interval": "调节间隔（分钟）",
+                    "deadband": "死区（±°C）",
+                    "min_setpoint": "空调设定值下限",
+                    "max_setpoint": "空调设定值上限",
+                    "sensor_timeout": "传感器失联超时（分钟）",
+                    "manual_pause": "人工接管暂停时长（分钟）",
+                    "feedforward": "前馈初始偏移",
+                    "dry_run": "试运行模式（只计算不下发）"
+                }
+            }
+        },
+        "error": {
+            "min_above_max": "设定值下限不能大于上限"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Follow-Me Climate 选项",
+                "data": {
+                    "name": "名称",
+                    "climate_entity": "空调（climate 实体）",
+                    "reference_sensor": "参考温度传感器",
+                    "target_temperature": "目标温度",
+                    "step": "调节步长（°C）",
+                    "adjust_interval": "调节间隔（分钟）",
+                    "deadband": "死区（±°C）",
+                    "min_setpoint": "空调设定值下限",
+                    "max_setpoint": "空调设定值上限",
+                    "sensor_timeout": "传感器失联超时（分钟）",
+                    "manual_pause": "人工接管暂停时长（分钟）",
+                    "feedforward": "前馈初始偏移",
+                    "dry_run": "试运行模式（只计算不下发）"
+                }
+            }
+        },
+        "error": {
+            "min_above_max": "设定值下限不能大于上限"
+        }
+    },
+    "entity": {
+        "switch": {
+            "enable": {
+                "name": "启用"
+            }
+        },
+        "number": {
+            "target_temperature": {
+                "name": "目标温度"
+            },
+            "step": {
+                "name": "调节步长"
+            }
+        },
+        "sensor": {
+            "status": {
+                "name": "状态"
+            },
+            "offset": {
+                "name": "已施加偏移"
+            },
+            "reference": {
+                "name": "参考温度"
+            }
+        }
+    }
+}

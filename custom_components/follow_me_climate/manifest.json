@@ -1,0 +1,13 @@
+{
+    "domain": "follow_me_climate",
+    "name": "Follow-Me Climate",
+    "documentation": "https://github.com/xiaolanglanglang/follow-me-climate",
+    "issue_tracker": "https://github.com/xiaolanglanglang/follow-me-climate/issues",
+    "dependencies": [],
+    "after_dependencies": ["climate"],
+    "codeowners": ["@xiaolanglanglang"],
+    "requirements": [],
+    "iot_class": "calculated",
+    "config_flow": true,
+    "version": "0.1.0"
+}

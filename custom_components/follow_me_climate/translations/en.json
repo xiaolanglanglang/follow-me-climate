@@ -1,0 +1,79 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Follow-Me Climate",
+                "description": "Keep the temperature where the reference sensor is, not where the AC's built-in sensor is. The integration slowly trims the AC setpoint in a closed loop.",
+                "data": {
+                    "name": "Name",
+                    "climate_entity": "Air conditioner (climate entity)",
+                    "reference_sensor": "Reference temperature sensor",
+                    "target_temperature": "Target temperature",
+                    "step": "Adjustment step (°C)",
+                    "adjust_interval": "Adjustment interval (minutes)",
+                    "deadband": "Deadband (±°C)",
+                    "min_setpoint": "Minimum AC setpoint",
+                    "max_setpoint": "Maximum AC setpoint",
+                    "sensor_timeout": "Sensor timeout (minutes)",
+                    "manual_pause": "Manual override pause (minutes)",
+                    "feedforward": "Feedforward initial offset",
+                    "dry_run": "Dry-run mode (compute but do not send)"
+                }
+            }
+        },
+        "error": {
+            "min_above_max": "Minimum setpoint must not be greater than maximum setpoint"
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Follow-Me Climate options",
+                "data": {
+                    "name": "Name",
+                    "climate_entity": "Air conditioner (climate entity)",
+                    "reference_sensor": "Reference temperature sensor",
+                    "target_temperature": "Target temperature",
+                    "step": "Adjustment step (°C)",
+                    "adjust_interval": "Adjustment interval (minutes)",
+                    "deadband": "Deadband (±°C)",
+                    "min_setpoint": "Minimum AC setpoint",
+                    "max_setpoint": "Maximum AC setpoint",
+                    "sensor_timeout": "Sensor timeout (minutes)",
+                    "manual_pause": "Manual override pause (minutes)",
+                    "feedforward": "Feedforward initial offset",
+                    "dry_run": "Dry-run mode (compute but do not send)"
+                }
+            }
+        },
+        "error": {
+            "min_above_max": "Minimum setpoint must not be greater than maximum setpoint"
+        }
+    },
+    "entity": {
+        "switch": {
+            "enable": {
+                "name": "Enable"
+            }
+        },
+        "number": {
+            "target_temperature": {
+                "name": "Target temperature"
+            },
+            "step": {
+                "name": "Adjustment step"
+            }
+        },
+        "sensor": {
+            "status": {
+                "name": "Status"
+            },
+            "offset": {
+                "name": "Applied offset"
+            },
+            "reference": {
+                "name": "Reference temperature"
+            }
+        }
+    }
+}
