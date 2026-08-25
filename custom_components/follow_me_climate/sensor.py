@@ -60,6 +60,7 @@ class FollowMeStatusSensor(FollowMeSensorBase):
     """What the controller is doing right now, and why."""
 
     _attr_translation_key = "status"
+    _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = ALL_STATUSES
 
     def __init__(self, controller: FollowMeController, entry: ConfigEntry) -> None:
