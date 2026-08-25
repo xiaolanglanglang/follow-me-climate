@@ -17,7 +17,8 @@
                     "sensor_timeout": "Sensor timeout (minutes)",
                     "manual_pause": "Manual override pause (minutes)",
                     "feedforward": "Feedforward initial offset",
-                    "dry_run": "Dry-run mode (compute but do not send)"
+                    "dry_run": "Dry-run mode (compute but do not send)",
+                    "follow_climate_power": "Turn off when the AC turns off"
                 }
             }
         },
@@ -42,7 +43,8 @@
                     "sensor_timeout": "Sensor timeout (minutes)",
                     "manual_pause": "Manual override pause (minutes)",
                     "feedforward": "Feedforward initial offset",
-                    "dry_run": "Dry-run mode (compute but do not send)"
+                    "dry_run": "Dry-run mode (compute but do not send)",
+                    "follow_climate_power": "Turn off when the AC turns off"
                 }
             }
         },

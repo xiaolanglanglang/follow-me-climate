@@ -234,3 +234,14 @@ def test_disable_restores_default():
     asyncio.run(controller.disable())
     assert adapter.writes[-1] == 26.0
     assert controller.status == "inactive"
+
+
+def test_follow_power_defaults_on_and_updates_runtime():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cooling")
+    controller, _ = make_controller(adapter, lambda: (26.0, 0.0))
+    assert controller.config.follow_power is True
+    controller.update_runtime({const.CONF_FOLLOW_POWER: False})
+    assert controller.config.follow_power is False
+    # A missing key keeps the current value instead of resetting to default.
+    controller.update_runtime({})
+    assert controller.config.follow_power is False

@@ -28,6 +28,7 @@ from .const import (
     CONF_DEADBAND,
     CONF_DRY_RUN,
     CONF_FEEDFORWARD,
+    CONF_FOLLOW_POWER,
     CONF_INTERVAL,
     CONF_MANUAL_PAUSE,
     CONF_SENSOR_TIMEOUT,
@@ -36,6 +37,7 @@ from .const import (
     DEFAULT_DEADBAND,
     DEFAULT_DRY_RUN,
     DEFAULT_FEEDFORWARD,
+    DEFAULT_FOLLOW_POWER,
     DEFAULT_INTERVAL,
     DEFAULT_MANUAL_PAUSE,
     DEFAULT_SENSOR_TIMEOUT,
@@ -68,6 +70,7 @@ class ControllerConfig:
     manual_pause: float = DEFAULT_MANUAL_PAUSE  # minutes
     feedforward: bool = DEFAULT_FEEDFORWARD
     dry_run: bool = DEFAULT_DRY_RUN
+    follow_power: bool = DEFAULT_FOLLOW_POWER
 
 
 class ClimateAdapter(Protocol):
@@ -188,6 +191,7 @@ class FollowMeController:
         cfg.manual_pause = float(options.get(CONF_MANUAL_PAUSE, cfg.manual_pause))
         cfg.feedforward = bool(options.get(CONF_FEEDFORWARD, cfg.feedforward))
         cfg.dry_run = bool(options.get(CONF_DRY_RUN, cfg.dry_run))
+        cfg.follow_power = bool(options.get(CONF_FOLLOW_POWER, cfg.follow_power))
         self.applied_options = dict(options)
         self._notify()
 

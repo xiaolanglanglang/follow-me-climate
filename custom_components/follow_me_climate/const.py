@@ -15,6 +15,7 @@ CONF_SENSOR_TIMEOUT = "sensor_timeout"
 CONF_MANUAL_PAUSE = "manual_pause"
 CONF_FEEDFORWARD = "feedforward"
 CONF_DRY_RUN = "dry_run"
+CONF_FOLLOW_POWER = "follow_climate_power"
 
 DEFAULT_NAME = "Follow-Me Climate"
 DEFAULT_TARGET = 26.0
@@ -27,6 +28,7 @@ DEFAULT_SENSOR_TIMEOUT = 10.0
 DEFAULT_MANUAL_PAUSE = 30.0
 DEFAULT_FEEDFORWARD = True
 DEFAULT_DRY_RUN = False
+DEFAULT_FOLLOW_POWER = True
 
 MIN_TARGET = 16.0
 MAX_TARGET = 30.0
@@ -46,6 +48,7 @@ MAX_MANUAL_PAUSE = 120.0
 # HVAC mode values, matching homeassistant.components.climate.HVACMode
 HVAC_COOL = "cooling"
 HVAC_HEAT = "heating"
+HVAC_OFF = "off"
 
 STATUS_INACTIVE = "inactive"
 STATUS_IDLE = "idle"
@@ -71,6 +74,7 @@ RUNTIME_KEYS = {
     CONF_MANUAL_PAUSE,
     CONF_FEEDFORWARD,
     CONF_DRY_RUN,
+    CONF_FOLLOW_POWER,
 }
 
 # Options that require a reload (they change entity wiring or bounds).

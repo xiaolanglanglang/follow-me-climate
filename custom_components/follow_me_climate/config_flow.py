@@ -22,6 +22,7 @@ from .const import (
     CONF_DEADBAND,
     CONF_DRY_RUN,
     CONF_FEEDFORWARD,
+    CONF_FOLLOW_POWER,
     CONF_INTERVAL,
     CONF_MANUAL_PAUSE,
     CONF_MAX_SP,
@@ -34,6 +35,7 @@ from .const import (
     DEFAULT_DEADBAND,
     DEFAULT_DRY_RUN,
     DEFAULT_FEEDFORWARD,
+    DEFAULT_FOLLOW_POWER,
     DEFAULT_INTERVAL,
     DEFAULT_MANUAL_PAUSE,
     DEFAULT_MAX_SP,
@@ -166,6 +168,10 @@ def _build_schema(defaults: dict[str, Any]) -> vol.Schema:
             ): BooleanSelector(),
             vol.Required(
                 CONF_DRY_RUN, default=default(CONF_DRY_RUN, DEFAULT_DRY_RUN)
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_FOLLOW_POWER,
+                default=default(CONF_FOLLOW_POWER, DEFAULT_FOLLOW_POWER),
             ): BooleanSelector(),
         }
     )

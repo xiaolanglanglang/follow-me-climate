@@ -17,7 +17,8 @@
                     "sensor_timeout": "传感器失联超时（分钟）",
                     "manual_pause": "人工接管暂停时长（分钟）",
                     "feedforward": "前馈初始偏移",
-                    "dry_run": "试运行模式（只计算不下发）"
+                    "dry_run": "试运行模式（只计算不下发）",
+                    "follow_climate_power": "空调关闭时自动停用"
                 }
             }
         },
@@ -42,7 +43,8 @@
                     "sensor_timeout": "传感器失联超时（分钟）",
                     "manual_pause": "人工接管暂停时长（分钟）",
                     "feedforward": "前馈初始偏移",
-                    "dry_run": "试运行模式（只计算不下发）"
+                    "dry_run": "试运行模式（只计算不下发）",
+                    "follow_climate_power": "空调关闭时自动停用"
                 }
             }
         },
