@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import ALL_STATUSES, DOMAIN
 from .controller import FollowMeController
@@ -17,7 +21,7 @@ from .controller import FollowMeController
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     controller: FollowMeController = hass.data[DOMAIN][entry.entry_id]
     async_add_entities(
@@ -83,7 +87,7 @@ class FollowMeOffsetSensor(FollowMeSensorBase):
 
     _attr_translation_key = "offset"
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-    _attr_state_class = "measurement"
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 1
 
     def __init__(self, controller: FollowMeController, entry: ConfigEntry) -> None:
@@ -99,8 +103,8 @@ class FollowMeReferenceSensor(FollowMeSensorBase):
     """The filtered reference temperature the controller acts on."""
 
     _attr_translation_key = "reference"
-    _attr_device_class = "temperature"
-    _attr_state_class = "measurement"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 1
 
     def __init__(self, controller: FollowMeController, entry: ConfigEntry) -> None:
