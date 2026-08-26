@@ -46,8 +46,8 @@ MIN_MANUAL_PAUSE = 0.0
 MAX_MANUAL_PAUSE = 120.0
 
 # HVAC mode values, matching homeassistant.components.climate.HVACMode
-HVAC_COOL = "cooling"
-HVAC_HEAT = "heating"
+HVAC_COOL = "cool"
+HVAC_HEAT = "heat"
 HVAC_OFF = "off"
 
 STATUS_INACTIVE = "inactive"

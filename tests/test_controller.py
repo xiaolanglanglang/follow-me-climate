@@ -11,7 +11,7 @@ STATUS_SENSOR_LOST = const.STATUS_SENSOR_LOST
 
 
 class FakeAdapter:
-    def __init__(self, setpoint=26.0, current_temperature=26.0, hvac_mode="cooling"):
+    def __init__(self, setpoint=26.0, current_temperature=26.0, hvac_mode="cool"):
         self.setpoint = setpoint
         self.current_temperature = current_temperature
         self.hvac_mode = hvac_mode
@@ -48,7 +48,7 @@ def enable(controller):
 
 def test_feedforward_cooling():
     # Person at 28.5, AC believes 26, target 26 -> setpoint 26 - 2.5 = 23.5.
-    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
     controller, _ = make_controller(adapter, lambda: (28.5, 0.0), target=26)
     enable(controller)
     tick(controller)
@@ -59,7 +59,7 @@ def test_feedforward_cooling():
 
 def test_feedforward_heating():
     # Person at 20, AC believes 24, target 24 -> setpoint 24 + 4 = 28.
-    adapter = FakeAdapter(setpoint=24, current_temperature=24, hvac_mode="heating")
+    adapter = FakeAdapter(setpoint=24, current_temperature=24, hvac_mode="heat")
     controller, _ = make_controller(adapter, lambda: (20.0, 0.0), target=24)
     enable(controller)
     tick(controller)
@@ -67,7 +67,7 @@ def test_feedforward_heating():
 
 
 def test_deadband_idle_no_write():
-    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
     controller, _ = make_controller(
         adapter, lambda: (26.2, 0.0), target=26, feedforward=False
     )
@@ -78,7 +78,7 @@ def test_deadband_idle_no_write():
 
 
 def test_converges_clamps_then_relaxes():
-    adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cool")
     sensor = {"value": 30.0}
     controller, clock = make_controller(
         adapter, lambda: (sensor["value"], 0.0), target=26, min_sp=25
@@ -110,7 +110,7 @@ def test_converges_clamps_then_relaxes():
 
 
 def test_rate_gate_defers_adjustment():
-    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
     sensor = {"value": 28.0}
     controller, clock = make_controller(
         adapter, lambda: (sensor["value"], 0.0), target=26, feedforward=False
@@ -128,7 +128,7 @@ def test_rate_gate_defers_adjustment():
 
 
 def test_manual_override_pauses_then_adopts():
-    adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cool")
     controller, clock = make_controller(
         adapter, lambda: (30.0, 0.0), target=26, manual_pause=30
     )
@@ -154,7 +154,7 @@ def test_manual_override_pauses_then_adopts():
 
 
 def test_sensor_lost_restores_default_and_reacquires():
-    adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cool")
     sensor = {"value": 30.0, "age": 0.0}
     controller, clock = make_controller(
         adapter, lambda: (sensor["value"], sensor["age"]), target=26
@@ -181,7 +181,7 @@ def test_sensor_lost_restores_default_and_reacquires():
 
 
 def test_unavailable_sensor_marks_lost():
-    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
     controller, _ = make_controller(
         adapter, lambda: (None, 0.0), target=26, feedforward=False
     )
@@ -192,7 +192,7 @@ def test_unavailable_sensor_marks_lost():
 
 
 def test_dry_run_never_writes():
-    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
     controller, clock = make_controller(
         adapter, lambda: (29.0, 0.0), target=26, dry_run=True
     )
@@ -209,7 +209,7 @@ def test_dry_run_never_writes():
 
 
 def test_median_filter_rejects_spike():
-    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
     controller, _ = make_controller(adapter, lambda: (26.0, 0.0))
     controller._readings.extend([28.0, 28.2, 40.0])
     assert controller._filtered() == 28.2
@@ -227,7 +227,7 @@ def test_inactive_when_hvac_off_or_fan_only():
 
 
 def test_disable_restores_default():
-    adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cool")
     controller, _ = make_controller(adapter, lambda: (30.0, 0.0), target=26)
     enable(controller)
     tick(controller)  # writes 23
@@ -237,7 +237,7 @@ def test_disable_restores_default():
 
 
 def test_follow_power_defaults_on_and_updates_runtime():
-    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cooling")
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
     controller, _ = make_controller(adapter, lambda: (26.0, 0.0))
     assert controller.config.follow_power is True
     controller.update_runtime({const.CONF_FOLLOW_POWER: False})
@@ -245,3 +245,13 @@ def test_follow_power_defaults_on_and_updates_runtime():
     # A missing key keeps the current value instead of resetting to default.
     controller.update_runtime({})
     assert controller.config.follow_power is False
+
+
+def test_hvac_constants_match_homeassistant_states():
+    # These must equal homeassistant.components.climate.HVACMode verbatim;
+    # the suite is HA-free, so the real values are pinned as literals.
+    # "cooling"/"heating" once made the control loop and the AC-off
+    # auto-stop silently ignore every real climate entity state.
+    assert const.HVAC_COOL == "cool"
+    assert const.HVAC_HEAT == "heat"
+    assert const.HVAC_OFF == "off"
