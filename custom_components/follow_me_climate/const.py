@@ -5,6 +5,7 @@ DOMAIN = "follow_me_climate"
 CONF_NAME = "name"
 CONF_CLIMATE_ENTITY = "climate_entity"
 CONF_SENSOR_ENTITY = "reference_sensor"
+CONF_POWER_ENTITY = "power_sensor"
 CONF_TARGET = "target_temperature"
 CONF_STEP = "step"
 CONF_INTERVAL = "adjust_interval"
@@ -64,6 +65,22 @@ ALL_STATUSES = [
     STATUS_SENSOR_LOST,
 ]
 
+# Power-momentum gate states (the status sensor's power_gate attribute).
+POWER_GATE_OFF = "off"  # no power sensor wired
+POWER_GATE_UNAVAILABLE = "unavailable"  # sensor missing/stale, gates inert
+POWER_GATE_WAITING = "waiting"  # evidence lag window after a setpoint write
+POWER_GATE_HOLDING = "holding"  # momentum confirmed, stepping deferred
+POWER_GATE_OPEN = "open"  # gates passed, stepping allowed
+
+# Power-gate tuning; not user-facing options until proven on real hardware.
+# Smart-plug evidence trails a setpoint write (inverter ramp-up plus the
+# plug's aggregation lag), so power is only judged after this window.
+POWER_RESPONSE_LAG = 180.0  # seconds after a write before power is judged
+POWER_RISE_RATIO = 0.30  # fraction of the baseline counted as a real rise
+POWER_RISE_MIN_W = 30.0  # absolute floor of that rise (standby baselines)
+POWER_HOLD_TIMEOUT = 15 * 60.0  # seconds a momentum hold may defer stepping
+POWER_STALE_TIMEOUT = 5 * 60.0  # seconds before power counts as unavailable
+
 # Options that can change at runtime without reloading the config entry.
 RUNTIME_KEYS = {
     CONF_TARGET,
@@ -82,6 +99,7 @@ STRUCTURAL_KEYS = {
     CONF_NAME,
     CONF_CLIMATE_ENTITY,
     CONF_SENSOR_ENTITY,
+    CONF_POWER_ENTITY,
     CONF_MIN_SP,
     CONF_MAX_SP,
 }

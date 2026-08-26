@@ -35,6 +35,7 @@ from .const import (
     CONF_MAX_SP,
     CONF_MIN_SP,
     CONF_NAME,
+    CONF_POWER_ENTITY,
     CONF_SENSOR_ENTITY,
     CONF_SENSOR_TIMEOUT,
     CONF_STEP,
@@ -155,11 +156,29 @@ def _build_controller(hass: HomeAssistant, entry: ConfigEntry) -> FollowMeContro
         age = (dt_util.utcnow() - state.last_updated).total_seconds()
         return value, max(age, 0.0)
 
+    power_reader = None
+    power_entity_id = merged.get(CONF_POWER_ENTITY)
+    if power_entity_id:
+
+        def read_power() -> tuple[float | None, float]:
+            state = hass.states.get(power_entity_id)
+            if state is None or state.state in ("unknown", "unavailable"):
+                return None, 0.0
+            try:
+                value = float(state.state)
+            except ValueError:
+                return None, 0.0
+            age = (dt_util.utcnow() - state.last_updated).total_seconds()
+            return value, max(age, 0.0)
+
+        power_reader = read_power
+
     controller = FollowMeController(
         name=merged.get(CONF_NAME, DEFAULT_NAME),
         config=config,
         adapter=HAClimateAdapter(hass, merged[CONF_CLIMATE_ENTITY]),
         sensor_reader=read_sensor,
+        power_reader=power_reader,
     )
     controller.applied_options = merged
     return controller

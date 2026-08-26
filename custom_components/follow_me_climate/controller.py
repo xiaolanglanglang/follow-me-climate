@@ -14,6 +14,13 @@ temperature settles on the target:
 
 A feedforward pass positions the setpoint once when following starts, using
 the (filtered) bias between reference and AC-sensed temperature.
+
+Optional power gating: a wattmeter reader turns the loop's blind stepping
+into evidence-paced stepping. Power evidence lags a write (inverter ramp-up
+plus meter aggregation), so it is only judged after a lag window; a rising
+draw means the last write is still doing its job, and further steps wait.
+The gate only ever defers stepping — it never replaces the reference loop,
+and it disarms itself whenever the power signal is missing or stale.
 """
 
 from __future__ import annotations
@@ -45,6 +52,16 @@ from .const import (
     DEFAULT_TARGET,
     HVAC_COOL,
     HVAC_HEAT,
+    POWER_GATE_HOLDING,
+    POWER_GATE_OFF,
+    POWER_GATE_OPEN,
+    POWER_GATE_UNAVAILABLE,
+    POWER_GATE_WAITING,
+    POWER_HOLD_TIMEOUT,
+    POWER_RESPONSE_LAG,
+    POWER_RISE_MIN_W,
+    POWER_RISE_RATIO,
+    POWER_STALE_TIMEOUT,
     STATUS_ADJUSTING,
     STATUS_IDLE,
     STATUS_INACTIVE,
@@ -89,6 +106,7 @@ class ClimateAdapter(Protocol):
 
 
 # Returns (value, age in seconds); value is None when unavailable.
+# The power reader shares this contract (value in watts).
 SensorReader = Callable[[], tuple[float | None, float]]
 NowFn = Callable[[], float]
 
@@ -102,12 +120,14 @@ class FollowMeController:
         config: ControllerConfig,
         adapter: ClimateAdapter,
         sensor_reader: SensorReader,
+        power_reader: SensorReader | None = None,
         now_fn: NowFn = time.monotonic,
     ) -> None:
         self.name = name
         self.config = config
         self._adapter = adapter
         self._reader = sensor_reader
+        self._power_reader = power_reader
         self._now = now_fn
 
         self.enabled = False
@@ -117,11 +137,21 @@ class FollowMeController:
         self.last_action_ts: float | None = None
         self.ref_filtered: float | None = None
 
+        # Power gating (inert without a power reader).
+        self.power_w: float | None = None
+        self.power_gate = (
+            POWER_GATE_OFF if power_reader is None else POWER_GATE_UNAVAILABLE
+        )
+
         # Snapshot of the merged options last applied, used by the update
         # listener to decide between a runtime update and a full reload.
         self.applied_options: dict = {}
 
         self._readings: deque[float] = deque(maxlen=5)
+        self._power_readings: deque[float] = deque(maxlen=5)
+        self._power_baseline: float | None = None
+        self._power_write_ts: float | None = None
+        self._momentum_since: float | None = None
         self._default_sp: float | None = None
         self._written_sp: float | None = None
         self._manual_until: float | None = None
@@ -156,18 +186,103 @@ class FollowMeController:
             return None
         return round(self._written_sp - self.config.target, 2)
 
+    @property
+    def power_baseline(self) -> float | None:
+        """Wattage snapshotted at the moment of the last setpoint write."""
+        return self._power_baseline
+
     def _clamp(self, value: float) -> float:
         return max(self.config.min_sp, min(self.config.max_sp, value))
 
-    def _filtered(self) -> float | None:
-        """Median of the last (up to) 3 readings, rejecting single spikes."""
-        if not self._readings:
+    @staticmethod
+    def _median(readings: deque[float]) -> float | None:
+        if not readings:
             return None
-        vals = sorted(list(self._readings)[-3:])
+        vals = sorted(list(readings)[-3:])
         n = len(vals)
         if n % 2 == 1:
             return vals[n // 2]
         return (vals[n // 2 - 1] + vals[n // 2]) / 2
+
+    def _filtered(self) -> float | None:
+        """Median of the last (up to) 3 readings, rejecting single spikes."""
+        return self._median(self._readings)
+
+    # -- power gating ------------------------------------------------------
+
+    def _reset_power_tracking(self) -> None:
+        """Forget write-anchored power state (enable, overrides, sensor loss)."""
+        self._power_baseline = None
+        self._power_write_ts = None
+        self._momentum_since = None
+
+    def _sample_power(self) -> None:
+        """Advance the power filter once per tick."""
+        if self._power_reader is None:
+            return
+        value, age = self._power_reader()
+        if value is None or age > POWER_STALE_TIMEOUT:
+            # Evidence gone: release any hold and fall back to the pure
+            # temperature loop rather than trusting a dead meter.
+            self.power_w = None
+            self.power_gate = POWER_GATE_UNAVAILABLE
+            self._power_readings.clear()
+            self._reset_power_tracking()
+            return
+        self._power_readings.append(value)
+        self.power_w = self._median(self._power_readings)
+
+    def _arm_power_gate(self) -> None:
+        """Anchor power tracking to a just-sent setpoint write."""
+        if self._power_reader is None or self.config.dry_run:
+            return
+        self._power_write_ts = self._now()
+        self._power_baseline = self.power_w
+        self._momentum_since = None
+
+    def _power_blocks_step(self) -> bool:
+        """Momentum gate: True while the draw says the last write is still
+        ramping the room toward the target and further steps should wait.
+
+        Power lags a write (inverter ramp plus meter aggregation), so nothing
+        is judged inside the lag window; a sustained hold is capped so a
+        lying meter cannot starve the temperature loop.
+        """
+        if self._power_reader is None or self.config.dry_run:
+            return False
+        now = self._now()
+        power = self.power_w
+        if power is None:
+            return False  # unavailable; _sample_power already flagged it
+        baseline = self._power_baseline
+        write_ts = self._power_write_ts
+        if baseline is None or write_ts is None:
+            # Nothing anchored yet; the next write arms the gate.
+            self.power_gate = POWER_GATE_OPEN
+            return False
+        if now - write_ts < POWER_RESPONSE_LAG:
+            self.power_gate = POWER_GATE_WAITING
+            return True
+        delta = power - baseline
+        rise = max(POWER_RISE_RATIO * baseline, POWER_RISE_MIN_W)
+        confirmed = delta >= rise
+        # Hysteresis: a hold persists until the rise decays to half.
+        in_band = delta >= rise / 2
+        if self._momentum_since is not None and (confirmed or in_band):
+            held_for = now - self._momentum_since
+            if held_for < POWER_HOLD_TIMEOUT:
+                self.power_gate = POWER_GATE_HOLDING
+                return True
+            # Held out: trust the temperature loop, and ratchet the baseline
+            # to the current draw so the gate re-arms only on a further rise.
+            self._power_baseline = power
+        elif confirmed:
+            self._momentum_since = now
+            self.power_gate = POWER_GATE_HOLDING
+            return True
+        self._momentum_since = None
+        self.power_gate = POWER_GATE_OPEN
+        return False
 
     def _record(self, message: str) -> None:
         """Record a setpoint action; this is what the rate gate paces."""
@@ -205,6 +320,8 @@ class FollowMeController:
         self._default_sp = self._adapter.setpoint
         self._written_sp = None  # first tick applies feedforward
         self._readings.clear()
+        self._power_readings.clear()
+        self._reset_power_tracking()
         self._manual_until = None
         self._restored_lost = False
         self.last_action_ts = None
@@ -225,6 +342,7 @@ class FollowMeController:
             await self._adapter.set_temperature(self._default_sp)
             self._record(f"disabled, restored default setpoint {self._default_sp}")
         self._written_sp = None
+        self._reset_power_tracking()
         self._notify()
 
     # -- control loop ------------------------------------------------------
@@ -234,6 +352,7 @@ class FollowMeController:
         if not self.enabled:
             return
         cfg = self.config
+        self._sample_power()
 
         # 1. reference sensor health
         value, age = self._reader()
@@ -248,6 +367,7 @@ class FollowMeController:
                 # Drop the stale window so re-acquisition is not polluted.
                 self._readings.clear()
                 self.ref_filtered = None
+                self._reset_power_tracking()
                 if (
                     not cfg.dry_run
                     and self._default_sp is not None
@@ -286,9 +406,14 @@ class FollowMeController:
             self._manual_until = None
             # Adopt the human's setpoint as the new baseline.
             self._written_sp = cur_sp
+            # Their write happened out of band; re-anchor power to ours.
+            self._reset_power_tracking()
             self._note(f"resumed from manual setpoint {cur_sp}")
         elif (
-            self._written_sp is not None
+            # Dry-run never writes, so a mismatch against would-be setpoints
+            # is not a human override; pausing on it would stall the trial.
+            not cfg.dry_run
+            and self._written_sp is not None
             and cur_sp is not None
             and abs(cur_sp - self._written_sp) > _EPS
         ):
@@ -311,6 +436,7 @@ class FollowMeController:
             if cur_sp is None or abs(ff_sp - cur_sp) > _EPS:
                 if not cfg.dry_run:
                     await self._adapter.set_temperature(ff_sp)
+                    self._arm_power_gate()
                 self._record(
                     f"{'would apply' if cfg.dry_run else 'applied'} "
                     f"feedforward setpoint {ff_sp}"
@@ -327,6 +453,11 @@ class FollowMeController:
         assert ref is not None
         err = direction * (ref - cfg.target)
         if abs(err) <= cfg.deadband:
+            # Comfort reached: any momentum tracking is moot until the next
+            # write re-arms it.
+            if self._power_reader is not None:
+                self._momentum_since = None
+                self.power_gate = POWER_GATE_OPEN
             self.status = STATUS_IDLE
             self.status_detail = f"reference {ref:.1f}, target {cfg.target:.1f}"
             self._notify()
@@ -343,6 +474,21 @@ class FollowMeController:
             self._notify()
             return
 
+        # 6.5 power momentum gate: a rising draw means the last write is
+        # still doing its job; let the reference temperature catch up first.
+        if self._power_blocks_step():
+            self.status = STATUS_ADJUSTING
+            if self.power_gate == POWER_GATE_WAITING:
+                self.status_detail = "awaiting power response"
+            else:
+                assert self._power_baseline is not None and self.power_w is not None
+                self.status_detail = (
+                    f"power {self.power_w - self._power_baseline:+.0f} W "
+                    "vs baseline, holding"
+                )
+            self._notify()
+            return
+
         # 7. step the setpoint toward comfort
         base_sp = self._written_sp
         delta = math.copysign(cfg.step, err) * (-direction)
@@ -355,6 +501,7 @@ class FollowMeController:
             return
         if not cfg.dry_run:
             await self._adapter.set_temperature(new_sp)
+            self._arm_power_gate()
         self._written_sp = new_sp
         self._record(
             f"{'would set' if cfg.dry_run else 'set'} {new_sp} "

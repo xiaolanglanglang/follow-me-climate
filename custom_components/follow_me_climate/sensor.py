@@ -80,6 +80,9 @@ class FollowMeStatusSensor(FollowMeSensorBase):
             "reference": controller.ref_filtered,
             "applied_setpoint": controller.applied_setpoint,
             "last_action": controller.last_action,
+            "power_w": controller.power_w,
+            "power_baseline_w": controller.power_baseline,
+            "power_gate": controller.power_gate,
         }
 
 

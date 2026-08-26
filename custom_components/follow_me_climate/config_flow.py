@@ -28,6 +28,7 @@ from .const import (
     CONF_MAX_SP,
     CONF_MIN_SP,
     CONF_NAME,
+    CONF_POWER_ENTITY,
     CONF_SENSOR_ENTITY,
     CONF_SENSOR_TIMEOUT,
     CONF_STEP,
@@ -82,6 +83,12 @@ def _build_schema(defaults: dict[str, Any]) -> vol.Schema:
                 CONF_SENSOR_ENTITY,
                 description={"suggested_value": defaults.get(CONF_SENSOR_ENTITY)},
             ): EntitySelector(EntitySelectorConfig(device_class="temperature")),
+            # Optional wattmeter on the AC's circuit; enables the power
+            # momentum gate when present. Empty submissions omit the key.
+            vol.Optional(
+                CONF_POWER_ENTITY,
+                description={"suggested_value": defaults.get(CONF_POWER_ENTITY)},
+            ): EntitySelector(EntitySelectorConfig(device_class="power")),
             vol.Required(
                 CONF_TARGET, default=default(CONF_TARGET, DEFAULT_TARGET)
             ): NumberSelector(
@@ -189,6 +196,8 @@ class FollowMeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
+            if not user_input.get(CONF_POWER_ENTITY):
+                user_input.pop(CONF_POWER_ENTITY, None)
             if user_input[CONF_MIN_SP] > user_input[CONF_MAX_SP]:
                 return self.async_show_form(
                     step_id="user",
@@ -213,6 +222,12 @@ class FollowMeOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None):
         if user_input is not None:
+            # Options replace the stored dict wholesale; pinning an explicit
+            # None keeps "cleared" sticky instead of resurrecting the
+            # entry.data value through the merge.
+            user_input[CONF_POWER_ENTITY] = (
+                user_input.get(CONF_POWER_ENTITY) or None
+            )
             if user_input[CONF_MIN_SP] > user_input[CONF_MAX_SP]:
                 return self.async_show_form(
                     step_id="init",

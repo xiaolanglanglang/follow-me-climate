@@ -22,7 +22,7 @@ class FakeAdapter:
         self.setpoint = setpoint
 
 
-def make_controller(adapter, reader, **overrides):
+def make_controller(adapter, reader, power_reader=None, **overrides):
     clock = {"t": 1000.0}
 
     def now():
@@ -33,6 +33,7 @@ def make_controller(adapter, reader, **overrides):
         config=ControllerConfig(**overrides),
         adapter=adapter,
         sensor_reader=reader,
+        power_reader=power_reader,
         now_fn=now,
     )
     return controller, clock
@@ -255,3 +256,240 @@ def test_hvac_constants_match_homeassistant_states():
     assert const.HVAC_COOL == "cool"
     assert const.HVAC_HEAT == "heat"
     assert const.HVAC_OFF == "off"
+
+
+# -- power momentum gate -------------------------------------------------
+# Median filtering needs two fresh samples before a new power level shows
+# up in power_w; every scenario below ticks twice after level changes.
+
+
+def test_power_gate_off_without_reader():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    controller, _ = make_controller(
+        adapter, lambda: (28.0, 0.0), target=26, feedforward=False
+    )
+    enable(controller)
+    tick(controller)
+    assert controller.power_gate == const.POWER_GATE_OFF
+    assert controller.power_w is None
+    assert adapter.writes == [25.5]
+
+
+def test_power_lag_window_defers_step():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    sensor = {"value": 28.0}
+    power = {"value": 100.0}
+    controller, clock = make_controller(
+        adapter,
+        lambda: (sensor["value"], 0.0),
+        power_reader=lambda: (power["value"], 0.0),
+        target=26,
+        interval=1,
+        feedforward=False,
+    )
+    enable(controller)
+    clock["t"] += 60
+    tick(controller)
+    assert adapter.writes == [25.5]
+    assert controller.power_baseline == 100.0
+    # Inside the evidence lag window even a huge rise must not be judged.
+    power["value"] = 500.0
+    for _ in range(2):
+        clock["t"] += 60
+        tick(controller)
+    assert adapter.writes == [25.5]
+    assert controller.power_gate == const.POWER_GATE_WAITING
+    # Lag elapsed: the rise confirms momentum -> hold instead of stepping.
+    clock["t"] += 60
+    tick(controller)
+    assert adapter.writes == [25.5]
+    assert controller.power_gate == const.POWER_GATE_HOLDING
+    assert "holding" in controller.status_detail
+    # Power recedes past the hysteresis release -> stepping resumes.
+    power["value"] = 105.0
+    for _ in range(2):
+        clock["t"] += 60
+        tick(controller)
+    assert adapter.writes == [25.5, 25.0]
+
+
+def test_power_hold_timeout_steps_and_ratchets_baseline():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    sensor = {"value": 28.0}
+    power = {"value": 100.0}
+    controller, clock = make_controller(
+        adapter,
+        lambda: (sensor["value"], 0.0),
+        power_reader=lambda: (power["value"], 0.0),
+        target=26,
+        feedforward=False,
+    )
+    enable(controller)
+    clock["t"] += 240
+    tick(controller)
+    assert adapter.writes == [25.5]
+    # Two sub-interval ticks let the median filter pick up the new level,
+    # then the decision tick sees the rise and holds.
+    power["value"] = 150.0
+    clock["t"] += 60
+    tick(controller)
+    clock["t"] += 60
+    tick(controller)
+    clock["t"] += 120
+    tick(controller)
+    assert controller.power_gate == const.POWER_GATE_HOLDING
+    assert adapter.writes == [25.5]
+    # The hold defers stepping only up to its timeout, then steps and
+    # re-anchors the baseline at the current draw.
+    clock["t"] += 4 * 240
+    tick(controller)
+    assert adapter.writes == [25.5, 25.0]
+    assert controller.power_baseline == 150.0
+    # The ratcheted baseline means a flat high draw no longer blocks.
+    clock["t"] += 240
+    tick(controller)
+    assert adapter.writes == [25.5, 25.0, 24.5]
+
+
+def test_power_unavailable_falls_back_to_temperature_loop():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    sensor = {"value": 28.0}
+    power = {"value": None}
+    controller, clock = make_controller(
+        adapter,
+        lambda: (sensor["value"], 0.0),
+        power_reader=lambda: (power["value"], 0.0),
+        target=26,
+        interval=1,
+        feedforward=False,
+    )
+    enable(controller)
+    for _ in range(2):
+        clock["t"] += 60
+        tick(controller)
+    assert controller.power_gate == const.POWER_GATE_UNAVAILABLE
+    # No anchor to compare against -> the gate never blocks.
+    assert adapter.writes == [25.5, 25.0]
+
+
+def test_power_loss_mid_hold_releases():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    sensor = {"value": 28.0}
+    power = {"value": 100.0}
+    controller, clock = make_controller(
+        adapter,
+        lambda: (sensor["value"], 0.0),
+        power_reader=lambda: (power["value"], power.get("age", 0.0)),
+        target=26,
+        interval=1,
+        feedforward=False,
+    )
+    enable(controller)
+    clock["t"] += 60
+    tick(controller)  # step, anchored at 100 W
+    power["value"] = 500.0
+    for _ in range(4):
+        clock["t"] += 60
+        tick(controller)  # two ticks filter, then wait + hold
+    assert controller.power_gate == const.POWER_GATE_HOLDING
+    # The meter dies mid-hold: the same tick releases and steps.
+    power.update(value=None, age=0.0)
+    clock["t"] += 60
+    tick(controller)
+    assert controller.power_gate == const.POWER_GATE_UNAVAILABLE
+    assert adapter.writes == [25.5, 25.0]
+
+
+def test_power_gate_inert_in_dry_run():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    sensor = {"value": 28.0}
+    power = {"value": 500.0}
+    controller, clock = make_controller(
+        adapter,
+        lambda: (sensor["value"], 0.0),
+        power_reader=lambda: (power["value"], 0.0),
+        target=26,
+        interval=1,
+        feedforward=False,
+        dry_run=True,
+    )
+    enable(controller)
+    for _ in range(3):
+        clock["t"] += 60
+        tick(controller)
+    assert adapter.writes == []
+    # Would-steps keep coming at cadence despite the elevated draw.
+    assert controller.applied_setpoint == 24.5
+    assert controller.power_gate != const.POWER_GATE_HOLDING
+
+
+def test_feedforward_arms_power_gate():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    power = {"value": 100.0}
+    controller, clock = make_controller(
+        adapter,
+        lambda: (28.5, 0.0),
+        power_reader=lambda: (power["value"], 0.0),
+        target=26,
+    )
+    enable(controller)
+    tick(controller)  # feedforward write
+    assert adapter.writes == [23.5]
+    assert controller.power_baseline == 100.0
+
+
+def test_manual_override_rearms_power_gate():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    sensor = {"value": 28.0}
+    power = {"value": 100.0}
+    controller, clock = make_controller(
+        adapter,
+        lambda: (sensor["value"], 0.0),
+        power_reader=lambda: (power["value"], 0.0),
+        target=26,
+        interval=1,
+        feedforward=False,
+        manual_pause=30,
+    )
+    enable(controller)
+    clock["t"] += 60
+    tick(controller)  # step to 25.5, anchored at 100 W
+    # A human takes over; the hold state must not survive the adoption.
+    adapter.setpoint = 20.0
+    clock["t"] += 60
+    tick(controller)
+    assert controller.status == STATUS_MANUAL_PAUSE
+    # While paused the draw rises; the filter picks it up.
+    power["value"] = 500.0
+    clock["t"] += 60
+    tick(controller)
+    clock["t"] += 60
+    tick(controller)
+    clock["t"] += 30 * 60 - 120  # pause expires
+    tick(controller)  # adopts 20.0, resets tracking, steps to 19.5
+    assert adapter.writes[-1] == 19.5
+    # The step re-anchored the baseline at the current draw.
+    assert controller.power_baseline == 500.0
+
+
+def test_sensor_lost_clears_power_tracking():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    sensor = {"value": 28.0, "age": 0.0}
+    power = {"value": 100.0}
+    controller, clock = make_controller(
+        adapter,
+        lambda: (sensor["value"], sensor["age"]),
+        power_reader=lambda: (power["value"], 0.0),
+        target=26,
+        interval=1,
+        feedforward=False,
+    )
+    enable(controller)
+    clock["t"] += 60
+    tick(controller)
+    assert controller.power_baseline == 100.0
+    sensor["age"] = 900
+    clock["t"] += 60
+    tick(controller)
+    assert controller.status == STATUS_SENSOR_LOST
+    assert controller.power_baseline is None
