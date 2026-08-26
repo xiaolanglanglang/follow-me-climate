@@ -71,12 +71,17 @@ def _build_schema(defaults: dict[str, Any]) -> vol.Schema:
             vol.Required(
                 CONF_NAME, default=default(CONF_NAME, DEFAULT_NAME)
             ): str,
-            vol.Required(CONF_CLIMATE_ENTITY): EntitySelector(
-                EntitySelectorConfig(domain="climate")
-            ),
-            vol.Required(CONF_SENSOR_ENTITY): EntitySelector(
-                EntitySelectorConfig(device_class="temperature")
-            ),
+            # suggested_value prefills the picker without weakening the
+            # required check; a plain default=None would let an empty
+            # submission pass validation with None.
+            vol.Required(
+                CONF_CLIMATE_ENTITY,
+                description={"suggested_value": defaults.get(CONF_CLIMATE_ENTITY)},
+            ): EntitySelector(EntitySelectorConfig(domain="climate")),
+            vol.Required(
+                CONF_SENSOR_ENTITY,
+                description={"suggested_value": defaults.get(CONF_SENSOR_ENTITY)},
+            ): EntitySelector(EntitySelectorConfig(device_class="temperature")),
             vol.Required(
                 CONF_TARGET, default=default(CONF_TARGET, DEFAULT_TARGET)
             ): NumberSelector(
