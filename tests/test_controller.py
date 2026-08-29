@@ -481,6 +481,40 @@ def test_feedforward_arms_power_gate():
     assert controller.power_baseline == 100.0
 
 
+def test_gate_waiting_from_the_write_itself():
+    # After a write the rate gate hides _power_blocks_step for a whole
+    # interval; the gate must already read waiting, not the stale
+    # constructor "unavailable" seen for minutes after a reload.
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    power = {"value": 100.0}
+    controller, _ = make_controller(
+        adapter,
+        lambda: (28.5, 0.0),
+        power_reader=lambda: (power["value"], 0.0),
+        target=26,
+    )
+    enable(controller)
+    tick(controller)  # feedforward write, anchored
+    assert controller.power_gate == const.POWER_GATE_WAITING
+
+
+def test_gate_open_with_fresh_meter_and_nothing_anchored():
+    # A live meter with no write to judge reads open immediately, even on
+    # tick paths that return before the gate is ever evaluated.
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="off")
+    power = {"value": 100.0}
+    controller, _ = make_controller(
+        adapter,
+        lambda: (30.0, 0.0),
+        power_reader=lambda: (power["value"], 0.0),
+        target=26,
+    )
+    enable(controller)
+    tick(controller)  # inactive: returns before _power_blocks_step
+    assert controller.status == "inactive"
+    assert controller.power_gate == const.POWER_GATE_OPEN
+
+
 def test_manual_override_rearms_power_gate():
     adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
     sensor = {"value": 28.0}

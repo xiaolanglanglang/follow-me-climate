@@ -247,6 +247,12 @@ class FollowMeController:
             return
         self._power_readings.append(value)
         self.power_w = self._median(self._power_readings)
+        # Fresh evidence but nothing anchored: no write is being judged, so
+        # the gate is open. Without this the constructor's "unavailable"
+        # lingers through windows where _power_blocks_step never runs
+        # (rate gate after a write, hvac inactive, manual pause).
+        if self._power_write_ts is None or self._power_baseline is None:
+            self.power_gate = POWER_GATE_OPEN
 
     def _arm_power_gate(self) -> None:
         """Anchor power tracking to a just-sent setpoint write."""
@@ -255,6 +261,12 @@ class FollowMeController:
         self._power_write_ts = self._now()
         self._power_baseline = self.power_w
         self._momentum_since = None
+        # Evidence will not be judged until the lag window elapses; show
+        # waiting from the write itself instead of the previous gate state.
+        # A dead meter at write time has nothing to wait for and keeps the
+        # "unavailable" the sampler already flagged.
+        if self.power_w is not None:
+            self.power_gate = POWER_GATE_WAITING
 
     def _power_blocks_step(self) -> bool:
         """Momentum gate: True while the draw says the last write is still
