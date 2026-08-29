@@ -69,7 +69,10 @@ from .const import (
     STATUS_SENSOR_LOST,
 )
 
-# Sets the tolerance for comparing setpoints (AC resolution is 0.5 degrees).
+# Tolerance for comparing our own numbers (writes, snapshots). The
+# manual-override check is wider — half a control step — so a device
+# rounding our write to its own resolution cannot read back as a human
+# touch (see _override_tolerance).
 _EPS = 0.05
 
 
@@ -193,6 +196,19 @@ class FollowMeController:
 
     def _clamp(self, value: float) -> float:
         return max(self.config.min_sp, min(self.config.max_sp, value))
+
+    def _snap(self, value: float) -> float:
+        """Snap a would-be write onto the control step grid.
+
+        The AC rounds any off-grid setpoint to its own resolution; the
+        rounded read-back would otherwise look like a manual override.
+        """
+        grid = round(value / self.config.step) * self.config.step
+        return self._clamp(round(grid, 6))
+
+    def _override_tolerance(self) -> float:
+        """A mismatch under half a step is device rounding, not a human."""
+        return max(_EPS, self.config.step / 2)
 
     @staticmethod
     def _median(readings: deque[float]) -> float | None:
@@ -415,7 +431,7 @@ class FollowMeController:
             not cfg.dry_run
             and self._written_sp is not None
             and cur_sp is not None
-            and abs(cur_sp - self._written_sp) > _EPS
+            and abs(cur_sp - self._written_sp) > self._override_tolerance()
         ):
             self._manual_until = self._now() + cfg.manual_pause * 60
             self.status = STATUS_MANUAL_PAUSE
@@ -427,11 +443,11 @@ class FollowMeController:
         # 4. first pass: position via feedforward, then hand over to the loop
         if self._written_sp is None:
             ac_temp = self._adapter.current_temperature
-            ff_sp = cur_sp if cur_sp is not None else self._clamp(cfg.target)
+            ff_sp = cur_sp if cur_sp is not None else self._snap(cfg.target)
             if cfg.feedforward and ac_temp is not None and ref is not None:
                 # Person = AC sensor + bias, so drive the AC sensor to
                 # target - bias. Same formula for cooling and heating.
-                ff_sp = self._clamp(cfg.target - (ref - ac_temp))
+                ff_sp = self._snap(cfg.target - (ref - ac_temp))
             self._written_sp = ff_sp
             if cur_sp is None or abs(ff_sp - cur_sp) > _EPS:
                 if not cfg.dry_run:
@@ -492,7 +508,7 @@ class FollowMeController:
         # 7. step the setpoint toward comfort
         base_sp = self._written_sp
         delta = math.copysign(cfg.step, err) * (-direction)
-        new_sp = self._clamp(base_sp + delta)
+        new_sp = self._snap(base_sp + delta)
         if abs(new_sp - base_sp) <= _EPS:
             self.status = STATUS_ADJUSTING
             bound = "min" if delta < 0 else "max"

@@ -154,6 +154,48 @@ def test_manual_override_pauses_then_adopts():
     assert controller.status == STATUS_ADJUSTING
 
 
+def test_feedforward_snaps_to_ac_grid():
+    # 26 - 3.4 = 22.6 is off the AC's 0.5-degree grid; the raw write would
+    # be rounded by the device and read back as a phantom manual override.
+    adapter = FakeAdapter(setpoint=26, current_temperature=26.4, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (29.8, 0.0), target=26)
+    enable(controller)
+    tick(controller)
+    assert adapter.writes == [22.5]
+    assert controller.offset == -3.5
+
+
+def test_offgrid_readback_does_not_trigger_manual_pause():
+    # A device reporting its own (finer) rounding of our write is noise,
+    # not a human override: the mismatch sits under half a step.
+    adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cool")
+    controller, clock = make_controller(
+        adapter, lambda: (30.0, 0.0), target=26, manual_pause=30
+    )
+    enable(controller)
+    tick(controller)  # feedforward writes 23.0
+    assert adapter.writes == [23.0]
+    adapter.setpoint = 23.1  # as if the device rounded to 0.1 degrees
+    clock["t"] += 60
+    tick(controller)
+    assert controller.status != STATUS_MANUAL_PAUSE
+
+
+def test_human_step_change_still_triggers_manual_pause():
+    # A genuine remote nudge of one full step stays far over the widened
+    # tolerance and must still yield to the human.
+    adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cool")
+    controller, clock = make_controller(
+        adapter, lambda: (30.0, 0.0), target=26, manual_pause=30
+    )
+    enable(controller)
+    tick(controller)  # feedforward writes 23.0
+    adapter.setpoint = 23.5  # one full step up, unmistakably human
+    clock["t"] += 60
+    tick(controller)
+    assert controller.status == STATUS_MANUAL_PAUSE
+
+
 def test_sensor_lost_restores_default_and_reacquires():
     adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cool")
     sensor = {"value": 30.0, "age": 0.0}
@@ -173,12 +215,13 @@ def test_sensor_lost_restores_default_and_reacquires():
     clock["t"] += 300
     tick(controller)
     assert adapter.writes == [23.0, 26.0]
-    # Sensor comes back fresh -> feedforward repositions.
+    # Sensor comes back fresh -> feedforward repositions (snapped to the
+    # 0.5-degree grid: raw 26 - (26.2 - 27) = 26.8 -> 27.0).
     sensor.update(value=26.2, age=0.0)
     clock["t"] += 300
     tick(controller)
     assert controller.status == STATUS_ADJUSTING
-    assert adapter.writes[-1] == 26.8  # 26 - (26.2 - 27)
+    assert adapter.writes[-1] == 27.0
 
 
 def test_unavailable_sensor_marks_lost():
