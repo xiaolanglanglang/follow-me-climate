@@ -8,6 +8,7 @@
                     "name": "Name",
                     "climate_entity": "Air conditioner (climate entity)",
                     "reference_sensor": "Reference temperature sensor",
+                    "power_sensor": "Power sensor (optional)",
                     "target_temperature": "Target temperature",
                     "step": "Adjustment step (°C)",
                     "adjust_interval": "Adjustment interval (minutes)",
@@ -19,6 +20,9 @@
                     "feedforward": "Feedforward initial offset",
                     "dry_run": "Dry-run mode (compute but do not send)",
                     "follow_climate_power": "Turn off when the AC turns off"
+                },
+                "data_description": {
+                    "power_sensor": "A wattmeter on the AC's circuit (e.g. a metering smart plug), in watts. Wiring one enables the power momentum gate; leave empty to disable."
                 }
             }
         },
@@ -34,6 +38,7 @@
                     "name": "Name",
                     "climate_entity": "Air conditioner (climate entity)",
                     "reference_sensor": "Reference temperature sensor",
+                    "power_sensor": "Power sensor (optional)",
                     "target_temperature": "Target temperature",
                     "step": "Adjustment step (°C)",
                     "adjust_interval": "Adjustment interval (minutes)",
@@ -45,6 +50,9 @@
                     "feedforward": "Feedforward initial offset",
                     "dry_run": "Dry-run mode (compute but do not send)",
                     "follow_climate_power": "Turn off when the AC turns off"
+                },
+                "data_description": {
+                    "power_sensor": "A wattmeter on the AC's circuit (e.g. a metering smart plug), in watts. Wiring one enables the power momentum gate; leave empty to disable."
                 }
             }
         },

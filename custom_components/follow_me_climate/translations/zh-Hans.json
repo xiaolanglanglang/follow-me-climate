@@ -8,6 +8,7 @@
                     "name": "名称",
                     "climate_entity": "空调（climate 实体）",
                     "reference_sensor": "参考温度传感器",
+                    "power_sensor": "功率传感器（可选）",
                     "target_temperature": "目标温度",
                     "step": "调节步长（°C）",
                     "adjust_interval": "调节间隔（分钟）",
@@ -19,6 +20,9 @@
                     "feedforward": "前馈初始偏移",
                     "dry_run": "试运行模式（只计算不下发）",
                     "follow_climate_power": "空调关闭时自动停用"
+                },
+                "data_description": {
+                    "power_sensor": "空调回路上的功率（W）实体（如带计量的智能插座）；配置后启用功率动量门控，留空即不启用。"
                 }
             }
         },
@@ -34,6 +38,7 @@
                     "name": "名称",
                     "climate_entity": "空调（climate 实体）",
                     "reference_sensor": "参考温度传感器",
+                    "power_sensor": "功率传感器（可选）",
                     "target_temperature": "目标温度",
                     "step": "调节步长（°C）",
                     "adjust_interval": "调节间隔（分钟）",
@@ -45,6 +50,9 @@
                     "feedforward": "前馈初始偏移",
                     "dry_run": "试运行模式（只计算不下发）",
                     "follow_climate_power": "空调关闭时自动停用"
+                },
+                "data_description": {
+                    "power_sensor": "空调回路上的功率（W）实体（如带计量的智能插座）；配置后启用功率动量门控，留空即不启用。"
                 }
             }
         },
