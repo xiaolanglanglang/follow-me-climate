@@ -81,6 +81,15 @@ POWER_RISE_MIN_W = 30.0  # absolute floor of that rise (standby baselines)
 POWER_HOLD_TIMEOUT = 15 * 60.0  # seconds a momentum hold may defer stepping
 POWER_STALE_TIMEOUT = 5 * 60.0  # seconds before power counts as unavailable
 
+# History-informed feedforward; not user-facing options until proven on
+# real hardware. The instant bias (reference minus AC-sensed) is noisy at
+# start-up — stratified room, AC sensor lag — so the recorder's recent
+# runtime history supplies a steadier median when there is enough of it.
+BIAS_WINDOW = 24.0 * 3600.0  # seconds of history feeding the bias estimate
+BIAS_MIN_SAMPLES = 20  # (reference, AC-sensed) pairs needed to trust it
+BIAS_MAX_INSTANT_GAP = 5.0  # deg C; learned this far from instant is dropped
+BIAS_PAIR_WINDOW = 300.0  # seconds; max timestamp distance for a valid pair
+
 # Options that can change at runtime without reloading the config entry.
 RUNTIME_KEYS = {
     CONF_TARGET,

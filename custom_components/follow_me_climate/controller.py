@@ -13,7 +13,15 @@ temperature settles on the target:
 - heating: reference too cold -> raise the AC setpoint
 
 A feedforward pass positions the setpoint once when following starts, using
-the (filtered) bias between reference and AC-sensed temperature.
+the (filtered) bias between reference and AC-sensed temperature. That instant
+bias is noisy at start-up, so the HA layer may pre-load a learned_bias (a
+median over recent runtime history) and primed readings; both are optional
+and the loop behaves exactly the same without them.
+
+Restart resume: the HA layer stages entity-restored convergence state
+(written setpoint, enable-time default, wall-clock stamp of the last action)
+and applies it right after enable(), so a reload continues where it left
+off instead of re-running the feedforward dance.
 
 Optional power gating: a wattmeter reader turns the loop's blind stepping
 into evidence-paced stepping. Power evidence lags a write (inverter ramp-up
@@ -32,6 +40,8 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from .const import (
+    BIAS_MAX_INSTANT_GAP,
+    BIAS_MIN_SAMPLES,
     CONF_DEADBAND,
     CONF_DRY_RUN,
     CONF_FEEDFORWARD,
@@ -62,6 +72,8 @@ from .const import (
     POWER_RISE_MIN_W,
     POWER_RISE_RATIO,
     POWER_STALE_TIMEOUT,
+    SP_ABS_MAX,
+    SP_ABS_MIN,
     STATUS_ADJUSTING,
     STATUS_IDLE,
     STATUS_INACTIVE,
@@ -74,6 +86,30 @@ from .const import (
 # rounding our write to its own resolution cannot read back as a human
 # touch (see _override_tolerance).
 _EPS = 0.05
+
+
+def median_bias(pairs: list[tuple[float, float]]) -> float | None:
+    """Median of (reference, AC-sensed) pairs; None when evidence is thin.
+
+    The median matches the loop's spike-rejecting philosophy; a stray hour
+    with windows flung open cannot drag the estimate.
+    """
+    if len(pairs) < BIAS_MIN_SAMPLES:
+        return None
+    diffs = sorted(ref - ac for ref, ac in pairs)
+    n = len(diffs)
+    if n % 2 == 1:
+        return diffs[n // 2]
+    return (diffs[n // 2 - 1] + diffs[n // 2]) / 2
+
+
+def _plausible_sp(value) -> float | None:
+    """A restored setpoint is only trusted inside the absolute AC range."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    if not SP_ABS_MIN <= value <= SP_ABS_MAX:
+        return None
+    return float(value)
 
 
 @dataclass
@@ -125,6 +161,7 @@ class FollowMeController:
         sensor_reader: SensorReader,
         power_reader: SensorReader | None = None,
         now_fn: NowFn = time.monotonic,
+        wall_now_fn: NowFn = time.time,
     ) -> None:
         self.name = name
         self.config = config
@@ -132,13 +169,19 @@ class FollowMeController:
         self._reader = sensor_reader
         self._power_reader = power_reader
         self._now = now_fn
+        self._wall_now = wall_now_fn
 
         self.enabled = False
         self.status = STATUS_INACTIVE
         self.status_detail = ""
         self.last_action = ""
         self.last_action_ts: float | None = None
+        # Wall-clock twin of last_action_ts, so the rate gate survives a
+        # restart (monotonic clocks do not).
+        self.last_action_wall: float | None = None
         self.ref_filtered: float | None = None
+        # Median bias pre-loaded from recorder history by the HA layer.
+        self.learned_bias: float | None = None
 
         # Power gating (inert without a power reader).
         self.power_w: float | None = None
@@ -159,6 +202,8 @@ class FollowMeController:
         self._written_sp: float | None = None
         self._manual_until: float | None = None
         self._restored_lost = False
+        # Entity-restored convergence state, held until apply_staged_restore.
+        self._pending_restore: dict | None = None
         self._listeners: list[Callable[[], None]] = []
 
     # -- plumbing ----------------------------------------------------------
@@ -181,6 +226,11 @@ class FollowMeController:
     @property
     def applied_setpoint(self) -> float | None:
         return self._written_sp
+
+    @property
+    def default_sp(self) -> float | None:
+        """Setpoint snapshotted when following began (the restore target)."""
+        return self._default_sp
 
     @property
     def offset(self) -> float | None:
@@ -223,6 +273,15 @@ class FollowMeController:
     def _filtered(self) -> float | None:
         """Median of the last (up to) 3 readings, rejecting single spikes."""
         return self._median(self._readings)
+
+    def _bias_for(self, instant: float | None) -> float | None:
+        """Pick the feedforward bias: learned median when trustworthy."""
+        learned = self.learned_bias
+        if learned is not None and (
+            instant is None or abs(learned - instant) <= BIAS_MAX_INSTANT_GAP
+        ):
+            return learned
+        return instant
 
     # -- power gating ------------------------------------------------------
 
@@ -316,6 +375,7 @@ class FollowMeController:
         """Record a setpoint action; this is what the rate gate paces."""
         self.last_action = message
         self.last_action_ts = self._now()
+        self.last_action_wall = self._wall_now()
 
     def _note(self, message: str) -> None:
         """Record an event that must not defer the next adjustment."""
@@ -338,6 +398,64 @@ class FollowMeController:
         self.applied_options = dict(options)
         self._notify()
 
+    # -- history priming and restart resume ---------------------------------
+
+    def prime_readings(self, values: list[float]) -> None:
+        """Seed the median window with fresh historical readings."""
+        for value in values:
+            self._readings.append(value)
+
+    def stage_restore(
+        self,
+        written_sp: float | None,
+        default_sp: float | None,
+        last_action_epoch: float | None,
+        last_action_text: str | None,
+    ) -> None:
+        """Hold entity-restored state until the setup tail applies it.
+
+        The entities restore during platform setup, but enable() clears
+        convergence state; __init__.py therefore applies this right after
+        its enable() call.
+        """
+        self._pending_restore = {
+            "written_sp": written_sp,
+            "default_sp": default_sp,
+            "last_action_epoch": last_action_epoch,
+            "last_action_text": last_action_text,
+        }
+
+    def apply_staged_restore(self) -> None:
+        """Adopt restored convergence state (call just after enable())."""
+        staged = self._pending_restore
+        self._pending_restore = None
+        if not staged:
+            return
+        written_sp = _plausible_sp(staged.get("written_sp"))
+        if written_sp is not None:
+            # Keep the value we actually wrote, not a clamped copy: the
+            # manual-override check compares it against the live read-back.
+            # User-bound violations get snapped back on the next step.
+            self._written_sp = written_sp
+        default_sp = _plausible_sp(staged.get("default_sp"))
+        if default_sp is not None:
+            self._default_sp = default_sp
+        epoch = staged.get("last_action_epoch")
+        if (
+            isinstance(epoch, (int, float))
+            and self._written_sp is not None
+            and self.last_action_wall is None
+        ):
+            # Translate the wall-clock stamp into this boot's monotonic
+            # domain so the rate gate keeps its cadence across the restart.
+            age = max(0.0, self._wall_now() - float(epoch))
+            self.last_action_ts = max(0.0, self._now() - age)
+            self.last_action_wall = float(epoch)
+        text = staged.get("last_action_text")
+        if text:
+            self.last_action = text
+        self._notify()
+
     # -- lifecycle ---------------------------------------------------------
 
     async def enable(self) -> None:
@@ -353,6 +471,7 @@ class FollowMeController:
         self._manual_until = None
         self._restored_lost = False
         self.last_action_ts = None
+        self.last_action_wall = None
         self._note(f"enabled, default setpoint {self._default_sp}")
         self._notify()
 
@@ -456,10 +575,15 @@ class FollowMeController:
         if self._written_sp is None:
             ac_temp = self._adapter.current_temperature
             ff_sp = cur_sp if cur_sp is not None else self._snap(cfg.target)
-            if cfg.feedforward and ac_temp is not None and ref is not None:
+            if cfg.feedforward and ref is not None:
                 # Person = AC sensor + bias, so drive the AC sensor to
                 # target - bias. Same formula for cooling and heating.
-                ff_sp = self._snap(cfg.target - (ref - ac_temp))
+                # Prefer a learned steady bias: the instant one samples
+                # whatever transient the room was in at start-up, and a
+                # learned bias positions even without an AC-sensed temp.
+                bias = self._bias_for(None if ac_temp is None else ref - ac_temp)
+                if bias is not None:
+                    ff_sp = self._snap(cfg.target - bias)
             self._written_sp = ff_sp
             if cur_sp is None or abs(ff_sp - cur_sp) > _EPS:
                 if not cfg.dry_run:

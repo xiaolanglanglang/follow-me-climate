@@ -2,7 +2,7 @@
 
 import asyncio
 
-from conftest import ControllerConfig, FollowMeController, const
+from conftest import ControllerConfig, FollowMeController, const, controller
 
 STATUS_ADJUSTING = const.STATUS_ADJUSTING
 STATUS_IDLE = const.STATUS_IDLE
@@ -22,11 +22,16 @@ class FakeAdapter:
         self.setpoint = setpoint
 
 
-def make_controller(adapter, reader, power_reader=None, **overrides):
+def make_controller(adapter, reader, power_reader=None, wall=None, **overrides):
     clock = {"t": 1000.0}
+    if wall is None:
+        wall = {"t": 1_000_000.0}
 
     def now():
         return clock["t"]
+
+    def wall_now():
+        return wall["t"]
 
     controller = FollowMeController(
         name="test",
@@ -35,6 +40,7 @@ def make_controller(adapter, reader, power_reader=None, **overrides):
         sensor_reader=reader,
         power_reader=power_reader,
         now_fn=now,
+        wall_now_fn=wall_now,
     )
     return controller, clock
 
@@ -570,3 +576,126 @@ def test_sensor_lost_clears_power_tracking():
     tick(controller)
     assert controller.status == STATUS_SENSOR_LOST
     assert controller.power_baseline is None
+
+
+# -- history-informed feedforward -----------------------------------------
+
+
+def test_median_bias_none_when_thin():
+    pairs = [(28.0, 26.0)] * (const.BIAS_MIN_SAMPLES - 1)
+    assert controller.median_bias(pairs) is None
+
+
+def test_median_bias_takes_the_median():
+    pairs = [(28.0, 26.0)] * 30
+    pairs[0] = (40.0, 20.0)  # stray hour with the windows open
+    pairs[1] = (10.0, 38.0)
+    assert controller.median_bias(pairs) == 2.0
+
+
+def test_feedforward_prefers_learned_bias():
+    # Instant bias would be 3.0; the learned steady median is 2.0.
+    adapter = FakeAdapter(setpoint=26, current_temperature=25.0, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (28.0, 0.0), target=26)
+    controller.learned_bias = 2.0
+    enable(controller)
+    tick(controller)
+    assert adapter.writes == [24.0]
+
+
+def test_learned_bias_positions_without_ac_temp():
+    # No AC-sensed temperature: the learned bias alone still positions.
+    adapter = FakeAdapter(setpoint=26, current_temperature=None, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (28.0, 0.0), target=26)
+    controller.learned_bias = 2.0
+    enable(controller)
+    tick(controller)
+    assert adapter.writes == [24.0]
+
+
+def test_learned_bias_discarded_when_far_from_instant():
+    # A learned value 8 degrees off the instant reading means something
+    # moved (sensor relocated, mode changed); trust the instant bias.
+    adapter = FakeAdapter(setpoint=26, current_temperature=26.0, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (28.0, 0.0), target=26)
+    controller.learned_bias = 10.0
+    enable(controller)
+    tick(controller)
+    assert adapter.writes == [24.0]
+
+
+def test_prime_readings_seed_the_median_window():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (26.0, 0.0))
+    controller.prime_readings([28.0, 28.2, 40.0])
+    assert controller._filtered() == 28.2
+    controller._readings.extend([28.1])
+    assert controller._filtered() == 28.2
+
+
+# -- restart resume ---------------------------------------------------------
+
+
+def test_restore_written_sp_skips_feedforward():
+    # Instant bias 3.5 would feedforward to 22.5; the restored written
+    # setpoint means the loop resumes stepping instead (23.5 -> 23.0).
+    adapter = FakeAdapter(setpoint=23.5, current_temperature=25.0, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (28.5, 0.0), target=26)
+    enable(controller)
+    controller.stage_restore(23.5, 26.0, None, None)
+    controller.apply_staged_restore()
+    tick(controller)
+    assert adapter.writes == [23.0]
+    assert controller.applied_setpoint == 23.0
+
+
+def test_restore_rate_gate_keeps_cadence():
+    adapter = FakeAdapter(setpoint=24.5, current_temperature=26, hvac_mode="cool")
+    wall = {"t": 1_000_000.0}
+    controller, clock = make_controller(
+        adapter, lambda: (28.0, 0.0), wall=wall, target=26, feedforward=False
+    )
+    enable(controller)
+    # The last setpoint action happened 60 wall-clock seconds ago.
+    controller.stage_restore(24.5, 26.0, wall["t"] - 60, "set 24.5")
+    controller.apply_staged_restore()
+    tick(controller)  # inside the 4-minute interval: no write yet
+    assert adapter.writes == []
+    assert "next adjustment" in controller.status_detail
+    assert controller.last_action == "set 24.5"
+    clock["t"] += 180  # 240s total since the restored write
+    tick(controller)
+    assert adapter.writes == [24.0]
+
+
+def test_restore_default_sp_on_disable():
+    # After a restart the enable-time snapshot is the converged setpoint;
+    # the restored default keeps disable() honest about the real default.
+    adapter = FakeAdapter(setpoint=23.5, current_temperature=25.0, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (26.0, 0.0), target=26)
+    enable(controller)  # snapshots 23.5 as (wrong) default
+    controller.stage_restore(23.5, 27.0, None, None)
+    controller.apply_staged_restore()
+    asyncio.run(controller.disable())
+    assert adapter.writes == [27.0]
+
+
+def test_restore_ignores_implausible_values():
+    adapter = FakeAdapter(setpoint=23.5, current_temperature=25.0, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (28.5, 0.0), target=26)
+    enable(controller)
+    controller.stage_restore("bogus", 99.0, "soon", None)
+    controller.apply_staged_restore()
+    assert controller.applied_setpoint is None  # feedforward will reposition
+    assert controller.default_sp == 23.5
+
+
+def test_record_stamps_wall_time():
+    adapter = FakeAdapter(setpoint=26, current_temperature=25.0, hvac_mode="cool")
+    wall = {"t": 1_000_000.0}
+    controller, _ = make_controller(adapter, lambda: (28.0, 0.0), wall=wall, target=26)
+    enable(controller)
+    wall["t"] += 42
+    tick(controller)  # feedforward write
+    assert controller.last_action_wall == 1_000_042.0
+    assert controller.last_action_ts is not None

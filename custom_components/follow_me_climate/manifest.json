@@ -4,10 +4,10 @@
     "documentation": "https://github.com/xiaolanglanglang/follow-me-climate",
     "issue_tracker": "https://github.com/xiaolanglanglang/follow-me-climate/issues",
     "dependencies": [],
-    "after_dependencies": ["climate"],
+    "after_dependencies": ["climate", "recorder"],
     "codeowners": ["@xiaolanglanglang"],
     "requirements": [],
     "iot_class": "calculated",
     "config_flow": true,
-    "version": "0.3.1"
+    "version": "0.4.0"
 }

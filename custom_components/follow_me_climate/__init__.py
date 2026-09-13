@@ -61,6 +61,7 @@ from .const import (
     STRUCTURAL_KEYS,
 )
 from .controller import ControllerConfig, FollowMeController
+from .history import prime_from_history
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -230,9 +231,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
 
-    # Start following right away with one immediate pass.
+    # Start following right away with one immediate pass. The platforms'
+    # restore pass has staged the previous convergence state by now; adopt
+    # it after enable() (which clears it), then warm the filters from
+    # recorder history before the first tick acts.
     try:
         await controller.enable()
+        controller.apply_staged_restore()
+        await prime_from_history(
+            hass,
+            controller,
+            climate_entity_id,
+            {**entry.data, **entry.options}[CONF_SENSOR_ENTITY],
+        )
         await _tick()
     except Exception:  # noqa: BLE001
         _LOGGER.exception("Follow-Me Climate initial pass failed")

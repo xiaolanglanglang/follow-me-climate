@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import ALL_STATUSES, DOMAIN
 from .controller import FollowMeController
@@ -56,8 +57,13 @@ class FollowMeSensorBase(SensorEntity):
         self._controller.remove_listener(self._handle_update)
 
 
-class FollowMeStatusSensor(FollowMeSensorBase):
-    """What the controller is doing right now, and why."""
+class FollowMeStatusSensor(RestoreEntity, FollowMeSensorBase):
+    """What the controller is doing right now, and why.
+
+    Also the durability point: the last state's attributes carry the
+    convergence context (applied setpoint, enable-time default, wall-clock
+    stamp of the last action) that a restart resumes from.
+    """
 
     _attr_translation_key = "status"
     _attr_device_class = SensorDeviceClass.ENUM
@@ -79,11 +85,33 @@ class FollowMeStatusSensor(FollowMeSensorBase):
             "dry_run": controller.config.dry_run,
             "reference": controller.ref_filtered,
             "applied_setpoint": controller.applied_setpoint,
+            "default_setpoint": controller.default_sp,
             "last_action": controller.last_action,
+            "last_action_time": controller.last_action_wall,
             "power_w": controller.power_w,
             "power_baseline_w": controller.power_baseline,
             "power_gate": controller.power_gate,
         }
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is None:
+            return
+        attrs = last_state.attributes
+        self._controller.stage_restore(
+            _as_float(attrs.get("applied_setpoint")),
+            _as_float(attrs.get("default_setpoint")),
+            _as_float(attrs.get("last_action_time")),
+            attrs.get("last_action"),
+        )
+
+
+def _as_float(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class FollowMeOffsetSensor(FollowMeSensorBase):
