@@ -117,6 +117,7 @@ async def prime_from_history(
             )
 
         pairs = _runtime_pairs(climate_states, ref_states)
+        controller.bias_samples = len(pairs)
         bias = median_bias(pairs)
         if bias is None:
             _LOGGER.debug(

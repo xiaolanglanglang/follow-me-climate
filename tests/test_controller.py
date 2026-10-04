@@ -11,13 +11,53 @@ STATUS_SENSOR_LOST = const.STATUS_SENSOR_LOST
 
 
 class FakeAdapter:
-    def __init__(self, setpoint=26.0, current_temperature=26.0, hvac_mode="cool"):
+    def __init__(
+        self,
+        setpoint=26.0,
+        current_temperature=26.0,
+        hvac_mode="cool",
+        min_temp=None,
+        max_temp=None,
+    ):
         self.setpoint = setpoint
         self.current_temperature = current_temperature
         self.hvac_mode = hvac_mode
+        # The AC's own accepted range; None means "does not expose one".
+        self.min_temp = min_temp
+        self.max_temp = max_temp
         self.writes = []
 
     async def set_temperature(self, setpoint):
+        self.writes.append(setpoint)
+        self.setpoint = setpoint
+
+
+class RejectingAdapter(FakeAdapter):
+    """Every write is refused, as HA does for out-of-range setpoints."""
+
+    def __init__(self, error=None, **kwargs):
+        super().__init__(**kwargs)
+        self.error = error or RuntimeError(
+            "Provided temperature 16.5 is not valid. Accepted range is 17.0 to 30.0"
+        )
+        self.attempts = 0
+
+    async def set_temperature(self, setpoint):
+        self.attempts += 1
+        raise self.error
+
+
+class FlakyAdapter(FakeAdapter):
+    """The first write fails, later ones succeed."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.attempts = 0
+
+    async def set_temperature(self, setpoint):
+        self.attempts += 1
+        if self.attempts == 1:
+            raise RuntimeError("device link busy")
         self.writes.append(setpoint)
         self.setpoint = setpoint
 
@@ -699,3 +739,140 @@ def test_record_stamps_wall_time():
     tick(controller)  # feedforward write
     assert controller.last_action_wall == 1_000_042.0
     assert controller.last_action_ts is not None
+
+
+def test_ac_entity_floor_overrides_configured_min():
+    # Option floor 16 against an AC that accepts 17..30: stepping must stop
+    # at 17 instead of sending setpoints the climate service rejects.
+    adapter = FakeAdapter(
+        setpoint=24.0,
+        current_temperature=24.0,
+        hvac_mode="cool",
+        min_temp=17.0,
+        max_temp=30.0,
+    )
+    controller, clock = make_controller(
+        adapter,
+        lambda: (30.0, 0.0),
+        target=26.0,
+        min_sp=16.0,
+        max_sp=30.0,
+        interval=1.0,
+        step=0.5,
+        deadband=0.1,
+    )
+    enable(controller)
+    for _ in range(40):
+        clock["t"] += 61
+        tick(controller)
+    assert adapter.writes, "the loop should have stepped down"
+    assert min(adapter.writes) == 17.0
+    assert controller.applied_setpoint == 17.0
+    assert controller.effective_min_sp == 17.0
+    assert "min bound" in controller.status_detail
+
+
+def test_contradictory_entity_bounds_fall_back_to_configured():
+    # An unusable entity range (min above max) must not clamp everything away.
+    adapter = FakeAdapter(min_temp=28.0, max_temp=18.0)
+    controller, _ = make_controller(
+        adapter, lambda: (26.0, 0.0), target=26.0, min_sp=16.0, max_sp=30.0
+    )
+    assert controller.effective_min_sp == 16.0
+    assert controller.effective_max_sp == 30.0
+
+
+def test_entity_ceiling_overrides_configured_max():
+    adapter = FakeAdapter(min_temp=None, max_temp=29.0)
+    controller, _ = make_controller(
+        adapter, lambda: (26.0, 0.0), target=26.0, min_sp=16.0, max_sp=30.0
+    )
+    assert controller.effective_min_sp == 16.0
+    assert controller.effective_max_sp == 29.0
+
+
+def test_rejected_write_parks_instead_of_raising():
+    adapter = RejectingAdapter(
+        setpoint=26.0, current_temperature=26.0, hvac_mode="cool"
+    )
+    controller, clock = make_controller(
+        adapter, lambda: (28.5, 0.0), target=26.0, interval=1.0
+    )
+    enable(controller)
+    tick(controller)  # the tick itself must not raise
+    assert adapter.attempts == 1
+    assert controller.write_error is not None
+    assert "not valid" in controller.write_error
+    assert controller.write_failures == 1
+    assert controller.applied_setpoint is None  # feedforward is retried later
+    assert controller.status == STATUS_ADJUSTING
+    assert "write rejected" in controller.status_detail
+
+    clock["t"] += 61
+    tick(controller)  # inside the parking window: no further attempt
+    assert adapter.attempts == 1
+    assert "retry in" in controller.status_detail
+
+    clock["t"] += 5 * 60
+    tick(controller)  # window elapsed: one more attempt
+    assert adapter.attempts == 2
+    assert controller.write_failures == 2
+
+
+def test_write_error_clears_after_a_successful_write():
+    adapter = FlakyAdapter(setpoint=26.0, current_temperature=26.0, hvac_mode="cool")
+    controller, clock = make_controller(
+        adapter, lambda: (28.5, 0.0), target=26.0, interval=1.0
+    )
+    enable(controller)
+    tick(controller)
+    assert controller.write_error == "device link busy"
+    clock["t"] += 6 * 60
+    tick(controller)
+    assert controller.write_error is None
+    assert controller.write_failures == 0
+    assert controller.applied_setpoint == 23.5  # the feedforward landed
+
+
+def test_restore_mismatch_on_default_repositions():
+    # Reload on the real device: unload wrote the enable-time default (26.0)
+    # back while the status sensor still advertised the converged 23.5. The
+    # first tick must re-position, not read our own restore as a human touch.
+    adapter = FakeAdapter(setpoint=26.0, current_temperature=26.0, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (28.5, 0.0), target=26.0)
+    enable(controller)
+    controller.stage_restore(23.5, 26.0, None, "set 23.5")
+    controller.apply_staged_restore()
+    tick(controller)
+    assert controller.status != STATUS_MANUAL_PAUSE
+    assert adapter.writes == [23.5]
+
+
+def test_restore_mismatch_with_human_value_reanchors():
+    adapter = FakeAdapter(setpoint=24.0, current_temperature=26.0, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (26.0, 0.0), target=26.0)
+    enable(controller)
+    controller.stage_restore(23.5, 20.0, None, "set 23.5")
+    controller.apply_staged_restore()
+    tick(controller)
+    assert controller.status != STATUS_MANUAL_PAUSE
+    assert controller.applied_setpoint == 24.0
+    assert adapter.writes == []
+
+
+def test_manual_override_still_pauses_after_restore_reanchor():
+    adapter = FakeAdapter(setpoint=26.0, current_temperature=26.0, hvac_mode="cool")
+    controller, clock = make_controller(
+        adapter, lambda: (26.0, 0.0), target=26.0, feedforward=False
+    )
+    enable(controller)
+    controller.stage_restore(23.5, 26.0, None, "set 23.5")
+    controller.apply_staged_restore()
+    tick(controller)
+    assert controller.status != STATUS_MANUAL_PAUSE
+
+    adapter.setpoint = 22.0  # a human moves it on the AC itself
+    clock["t"] += 61
+    tick(controller)
+    assert controller.status == STATUS_MANUAL_PAUSE
+    assert "changed externally" in controller.status_detail

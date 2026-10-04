@@ -79,6 +79,8 @@ from .const import (
     STATUS_INACTIVE,
     STATUS_MANUAL_PAUSE,
     STATUS_SENSOR_LOST,
+    WRITE_BACKOFF_INTERVALS,
+    WRITE_ERROR_MAX_CHARS,
 )
 
 # Tolerance for comparing our own numbers (writes, snapshots). The
@@ -112,6 +114,18 @@ def _plausible_sp(value) -> float | None:
     return float(value)
 
 
+def _short_error(err: Exception) -> str:
+    """A one-line reason for a rejected write, safe for state attributes."""
+    text = str(err).strip() or err.__class__.__name__
+    if len(text) > WRITE_ERROR_MAX_CHARS:
+        text = text[: WRITE_ERROR_MAX_CHARS - 1] + "…"
+    return text
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 @dataclass
 class ControllerConfig:
     """Tunable parameters, all adjustable at runtime."""
@@ -140,6 +154,12 @@ class ClimateAdapter(Protocol):
 
     @property
     def hvac_mode(self) -> str | None: ...
+
+    @property
+    def min_temp(self) -> float | None: ...
+
+    @property
+    def max_temp(self) -> float | None: ...
 
     async def set_temperature(self, setpoint: float) -> None: ...
 
@@ -182,6 +202,11 @@ class FollowMeController:
         self.ref_filtered: float | None = None
         # Median bias pre-loaded from recorder history by the HA layer.
         self.learned_bias: float | None = None
+        # How many (reference, AC-sensed) pairs that estimate rests on.
+        self.bias_samples: int | None = None
+        # Last rejected write (device/service error) and its parking timer.
+        self.write_error: str | None = None
+        self.write_failures = 0
 
         # Power gating (inert without a power reader).
         self.power_w: float | None = None
@@ -202,6 +227,10 @@ class FollowMeController:
         self._written_sp: float | None = None
         self._manual_until: float | None = None
         self._restored_lost = False
+        self._write_backoff_until: float | None = None
+        # Set by apply_staged_restore: the first tick after a resume must not
+        # mistake the unload-restored default for a human override.
+        self._restore_anchor_pending = False
         # Entity-restored convergence state, held until apply_staged_restore.
         self._pending_restore: dict | None = None
         self._listeners: list[Callable[[], None]] = []
@@ -244,8 +273,38 @@ class FollowMeController:
         """Wattage snapshotted at the moment of the last setpoint write."""
         return self._power_baseline
 
+    def _effective_bounds(self) -> tuple[float, float]:
+        """Configured clamp bounds, intersected with the AC's real range.
+
+        HA's climate service rejects an out-of-range temperature with
+        ServiceValidationError, so a configured bound wider than the entity's
+        own (16 °C against an AC whose floor is 17 °C) turns every step into a
+        failed write. getattr() keeps partial adapters working.
+        """
+        low, high = self.config.min_sp, self.config.max_sp
+        ac_min = getattr(self._adapter, "min_temp", None)
+        ac_max = getattr(self._adapter, "max_temp", None)
+        if _is_number(ac_min):
+            low = max(low, float(ac_min))
+        if _is_number(ac_max):
+            high = min(high, float(ac_max))
+        if low > high:
+            # Contradictory wiring (swapped bounds, unusable entity range):
+            # trust the configured pair instead of clamping to nothing.
+            return self.config.min_sp, self.config.max_sp
+        return low, high
+
+    @property
+    def effective_min_sp(self) -> float:
+        return self._effective_bounds()[0]
+
+    @property
+    def effective_max_sp(self) -> float:
+        return self._effective_bounds()[1]
+
     def _clamp(self, value: float) -> float:
-        return max(self.config.min_sp, min(self.config.max_sp, value))
+        low, high = self._effective_bounds()
+        return max(low, min(high, value))
 
     def _snap(self, value: float) -> float:
         """Snap a would-be write onto the control step grid.
@@ -381,6 +440,55 @@ class FollowMeController:
         """Record an event that must not defer the next adjustment."""
         self.last_action = message
 
+    # -- outbound writes ---------------------------------------------------
+
+    def _write_blocked(self) -> bool:
+        """True while a rejected write is serving its parking window."""
+        if self._write_backoff_until is None:
+            return False
+        if self._now() >= self._write_backoff_until:
+            self._write_backoff_until = None
+            return False
+        return True
+
+    def _backoff_detail(self) -> str:
+        remaining = 0.0
+        if self._write_backoff_until is not None:
+            remaining = max(0.0, (self._write_backoff_until - self._now()) / 60)
+        return (
+            f"write rejected ({self.write_error or 'unknown'}); "
+            f"retry in {remaining:.0f} min"
+        )
+
+    async def _write(self, setpoint: float, what: str, park: bool = True) -> bool:
+        """Send one setpoint write, absorbing rejections.
+
+        An AC can refuse a write (offline device, cloud error, service
+        validation). Letting that propagate aborts the tick, so the platform
+        timer logs a traceback on every poll while the loop retries at full
+        rate. Instead the rejection is recorded, surfaced on the status
+        sensor, and the loop parks for a few adjust intervals. With park=True
+        the caller's loop stops stepping; safety writes (sensor-lost restore,
+        disable restore) pass park=False to keep their own status.
+        """
+        try:
+            await self._adapter.set_temperature(setpoint)
+        except Exception as err:  # noqa: BLE001 - any adapter failure is ours
+            self.write_failures += 1
+            self.write_error = _short_error(err)
+            pause = max(1.0, WRITE_BACKOFF_INTERVALS * self.config.interval)
+            self._write_backoff_until = self._now() + pause * 60
+            self._note(f"{what} rejected by the AC: {self.write_error}")
+            if park:
+                self.status = STATUS_ADJUSTING
+                self.status_detail = self._backoff_detail()
+            self._notify()
+            return False
+        self.write_error = None
+        self.write_failures = 0
+        self._write_backoff_until = None
+        return True
+
     def update_runtime(self, options: dict) -> None:
         """Apply option changes that do not need an entry reload."""
         cfg = self.config
@@ -437,6 +545,11 @@ class FollowMeController:
             # manual-override check compares it against the live read-back.
             # User-bound violations get snapped back on the next step.
             self._written_sp = written_sp
+            # Unload writes the enable-time default back to the AC, so a
+            # resumed setpoint legitimately differs from the live one. Flag
+            # the next tick to re-anchor instead of reading our own restore
+            # as a human override (which would pause for manual_pause min).
+            self._restore_anchor_pending = True
         default_sp = _plausible_sp(staged.get("default_sp"))
         if default_sp is not None:
             self._default_sp = default_sp
@@ -470,6 +583,8 @@ class FollowMeController:
         self._reset_power_tracking()
         self._manual_until = None
         self._restored_lost = False
+        # A fresh start must not inherit a parking window from the last run.
+        self._write_backoff_until = None
         self.last_action_ts = None
         self.last_action_wall = None
         self._note(f"enabled, default setpoint {self._default_sp}")
@@ -486,9 +601,10 @@ class FollowMeController:
             and self._default_sp is not None
             and abs(self._written_sp - self._default_sp) > _EPS
         ):
-            await self._adapter.set_temperature(self._default_sp)
-            self._record(f"disabled, restored default setpoint {self._default_sp}")
+            if await self._write(self._default_sp, "disable restore", park=False):
+                self._record(f"disabled, restored default setpoint {self._default_sp}")
         self._written_sp = None
+        self._write_backoff_until = None
         self._reset_power_tracking()
         self._notify()
 
@@ -517,12 +633,15 @@ class FollowMeController:
                 self._reset_power_tracking()
                 if (
                     not cfg.dry_run
+                    and not self._write_blocked()
                     and self._default_sp is not None
                     and self._adapter.setpoint is not None
                     and abs(self._adapter.setpoint - self._default_sp) > _EPS
                 ):
-                    await self._adapter.set_temperature(self._default_sp)
-                    self._record(f"sensor lost, restored {self._default_sp}")
+                    if await self._write(
+                        self._default_sp, "sensor-lost restore", park=False
+                    ):
+                        self._record(f"sensor lost, restored {self._default_sp}")
             self._notify()
             return
         self._restored_lost = False
@@ -539,10 +658,38 @@ class FollowMeController:
             return
         direction = 1.0 if hvac == HVAC_COOL else -1.0
 
+        # 2.5 a rejected write parks the loop briefly: retrying every poll
+        # would spam both the log and the device.
+        if self._write_blocked():
+            self.status = STATUS_ADJUSTING
+            self.status_detail = self._backoff_detail()
+            self._notify()
+            return
+
         # 3. manual override: someone touched the setpoint elsewhere.
         # While paused (or once it expires) skip the mismatch check, so the
         # pause is not re-triggered every minute before it can elapse.
         cur_sp = self._adapter.setpoint
+        if self._restore_anchor_pending:
+            self._restore_anchor_pending = False
+            if (
+                self._written_sp is not None
+                and cur_sp is not None
+                and abs(cur_sp - self._written_sp) > self._override_tolerance()
+            ):
+                if self._default_sp is None or abs(cur_sp - self._default_sp) <= _EPS:
+                    # The AC sits on the enable-time default, so the unload
+                    # path put it back and our converged setpoint is gone:
+                    # drop it and let the next pass re-position from the
+                    # learned bias instead of walking there step by step.
+                    self._note(f"resumed on default setpoint {cur_sp}; re-positioning")
+                    self._written_sp = None
+                else:
+                    # Someone else moved it: adopt their value as the baseline.
+                    self._note(f"resumed at AC setpoint {cur_sp} (restore mismatch)")
+                    self._written_sp = cur_sp
+                self._reset_power_tracking()
+                self._notify()
         if self._manual_until is not None:
             if self._now() < self._manual_until:
                 remaining = (self._manual_until - self._now()) / 60
@@ -587,7 +734,12 @@ class FollowMeController:
             self._written_sp = ff_sp
             if cur_sp is None or abs(ff_sp - cur_sp) > _EPS:
                 if not cfg.dry_run:
-                    await self._adapter.set_temperature(ff_sp)
+                    if not await self._write(ff_sp, "feedforward"):
+                        # Stay unpositioned so the next tick retries the
+                        # feedforward instead of reading our unsent value as
+                        # a human override.
+                        self._written_sp = None
+                        return
                     self._arm_power_gate()
                 self._record(
                     f"{'would apply' if cfg.dry_run else 'applied'} "
@@ -652,7 +804,8 @@ class FollowMeController:
             self._notify()
             return
         if not cfg.dry_run:
-            await self._adapter.set_temperature(new_sp)
+            if not await self._write(new_sp, "setpoint"):
+                return  # _write parked the loop and reported the reason
             self._arm_power_gate()
         self._written_sp = new_sp
         self._record(

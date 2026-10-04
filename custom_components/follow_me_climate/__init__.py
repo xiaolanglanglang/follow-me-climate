@@ -6,12 +6,15 @@ not at the AC's built-in sensor, by gently trimming the AC setpoint.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 
 import homeassistant.util.dt as dt_util
 from homeassistant.components.climate import (
     ATTR_CURRENT_TEMPERATURE,
+    ATTR_MAX_TEMP,
+    ATTR_MIN_TEMP,
     ATTR_TARGET_TEMP_STEP,
     DOMAIN as CLIMATE_DOMAIN,
     SERVICE_SET_TEMPERATURE,
@@ -101,6 +104,16 @@ class HAClimateAdapter:
         state = self._state
         return state.state if state else None
 
+    @property
+    def min_temp(self) -> float | None:
+        """The AC's own lower bound; HA rejects setpoints below it."""
+        return _temp_attribute(self._state, ATTR_MIN_TEMP)
+
+    @property
+    def max_temp(self) -> float | None:
+        """The AC's own upper bound; HA rejects setpoints above it."""
+        return _temp_attribute(self._state, ATTR_MAX_TEMP)
+
     async def set_temperature(self, setpoint: float) -> None:
         await self._hass.services.async_call(
             CLIMATE_DOMAIN,
@@ -108,6 +121,17 @@ class HAClimateAdapter:
             {ATTR_ENTITY_ID: self._entity_id, ATTR_TEMPERATURE: setpoint},
             blocking=True,
         )
+
+
+def _temp_attribute(state, key: str) -> float | None:
+    """Read one numeric temperature attribute from a state, if usable."""
+    if state is None:
+        return None
+    try:
+        value = float(state.attributes.get(key))
+    except (TypeError, ValueError):
+        return None
+    return value
 
 
 def ac_target_temp_step(hass: HomeAssistant, entity_id: str) -> float | None:
@@ -264,6 +288,33 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
+async def _reload_after_options_change(hass: HomeAssistant, entry_id: str) -> None:
+    """Reload an entry once its options update has settled.
+
+    Saving options dispatches the update listener while the entry is
+    transiently absent from the registry (HA 2026.9), so reloading inline
+    raises UnknownEntry inside a background task and nothing is logged that
+    says the new options were never applied. Deferring the reload to its own
+    task and retrying briefly absorbs that window, and a genuine failure is
+    reported instead of disappearing.
+    """
+    last_error: Exception | None = None
+    for attempt in range(3):
+        # Yield before the first try (and back off between retries) so the
+        # options update has finished committing and the entry is registered.
+        await asyncio.sleep(0.5 * attempt)
+        try:
+            await hass.config_entries.async_reload(entry_id)
+            return
+        except Exception as err:  # noqa: BLE001 - options saves must not crash HA
+            last_error = err
+    _LOGGER.error(
+        "Follow-Me Climate: reload after an options change failed (%s); "
+        "reload the integration manually to apply the new options",
+        last_error,
+    )
+
+
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Reload on structural changes, hot-apply runtime-only changes."""
     controller: FollowMeController | None = (
@@ -274,6 +325,8 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
         merged.get(key) != controller.applied_options.get(key)
         for key in STRUCTURAL_KEYS
     ):
-        await hass.config_entries.async_reload(entry)
+        hass.async_create_task(
+            _reload_after_options_change(hass, entry.entry_id),
+        )
         return
     controller.update_runtime(merged)

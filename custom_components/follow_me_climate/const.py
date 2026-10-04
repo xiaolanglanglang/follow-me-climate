@@ -90,6 +90,12 @@ BIAS_MIN_SAMPLES = 20  # (reference, AC-sensed) pairs needed to trust it
 BIAS_MAX_INSTANT_GAP = 5.0  # deg C; learned this far from instant is dropped
 BIAS_PAIR_WINDOW = 300.0  # seconds; max timestamp distance for a valid pair
 
+# A setpoint write the AC refuses (device offline, cloud error, service
+# validation) parks the loop instead of being retried on every poll, which
+# would spam both the log and the device. Expressed in adjust intervals.
+WRITE_BACKOFF_INTERVALS = 5.0
+WRITE_ERROR_MAX_CHARS = 160  # cap on the recorded rejection message
+
 # Options that can change at runtime without reloading the config entry.
 RUNTIME_KEYS = {
     CONF_TARGET,

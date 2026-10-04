@@ -91,6 +91,12 @@ class FollowMeStatusSensor(RestoreEntity, FollowMeSensorBase):
             "power_w": controller.power_w,
             "power_baseline_w": controller.power_baseline,
             "power_gate": controller.power_gate,
+            "learned_bias": controller.learned_bias,
+            "bias_samples": controller.bias_samples,
+            "effective_min_sp": controller.effective_min_sp,
+            "effective_max_sp": controller.effective_max_sp,
+            "write_error": controller.write_error,
+            "write_failures": controller.write_failures,
         }
 
     async def async_added_to_hass(self) -> None:
@@ -136,6 +142,7 @@ class FollowMeReferenceSensor(FollowMeSensorBase):
 
     _attr_translation_key = "reference"
     _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 1
 
