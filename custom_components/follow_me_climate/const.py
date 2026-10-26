@@ -51,6 +51,13 @@ HVAC_COOL = "cool"
 HVAC_HEAT = "heat"
 HVAC_OFF = "off"
 
+# hvac_action values (HA's HVACAction enum): what the unit is doing right now,
+# as opposed to the mode it is set to. Only an actively working unit holds a
+# room, which is what makes a settled setpoint worth learning from.
+HVAC_ACTION_COOL = "cooling"
+HVAC_ACTION_HEAT = "heating"
+HVAC_ACTIONS_WORKING = (HVAC_ACTION_COOL, HVAC_ACTION_HEAT)
+
 STATUS_INACTIVE = "inactive"
 STATUS_IDLE = "idle"
 STATUS_ADJUSTING = "adjusting"
@@ -89,6 +96,19 @@ BIAS_WINDOW = 24.0 * 3600.0  # seconds of history feeding the bias estimate
 BIAS_MIN_SAMPLES = 20  # (reference, AC-sensed) pairs needed to trust it
 BIAS_MAX_INSTANT_GAP = 5.0  # deg C; learned this far from instant is dropped
 BIAS_PAIR_WINDOW = 300.0  # seconds; max timestamp distance for a valid pair
+
+# Feedforward positioning from the settled "dropout": the steady gap between
+# the room (reference sensor) and the setpoint we wrote. Units whose reported
+# temperature simply tracks their own setpoint — a supply-air or coil-sited
+# thermistor — keep the AC-sensed bias near zero no matter how far the room
+# really is from target, so the offset has to be measured against the
+# setpoint instead. Measured at equilibrium it is the position that holds the
+# target, which is what the first write after enabling should land on.
+DROPOUT_SETTLE_SECONDS = 600.0  # setpoint unchanged this long = settled
+DROPOUT_PAIR_WINDOW = 300.0  # seconds; max distance to pair a reference reading
+DROPOUT_MIN_SAMPLES = 10  # settled pairs needed to trust a learned dropout
+DROPOUT_MAX_ABS = 10.0  # deg C; a wider gap is not a steady room
+DROPOUT_LIVE_SAMPLES = 3  # settled idle observations behind the live value
 
 # A setpoint write the AC refuses (device offline, cloud error, service
 # validation) parks the loop instead of being retried on every poll, which

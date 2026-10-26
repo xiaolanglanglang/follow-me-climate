@@ -18,10 +18,13 @@ class FakeAdapter:
         hvac_mode="cool",
         min_temp=None,
         max_temp=None,
+        hvac_action="cooling",
     ):
         self.setpoint = setpoint
         self.current_temperature = current_temperature
         self.hvac_mode = hvac_mode
+        # What the unit is doing right now (HA's hvac_action), not its mode.
+        self.hvac_action = hvac_action
         # The AC's own accepted range; None means "does not expose one".
         self.min_temp = min_temp
         self.max_temp = max_temp
@@ -671,6 +674,116 @@ def test_prime_readings_seed_the_median_window():
     assert controller._filtered() == 28.2
     controller._readings.extend([28.1])
     assert controller._filtered() == 28.2
+
+
+# -- settled-dropout positioning -------------------------------------------
+
+
+def test_median_dropout_none_when_thin():
+    pairs = [(23.8, 17.0)] * (const.DROPOUT_MIN_SAMPLES - 1)
+    assert controller.median_dropout(pairs) is None
+
+
+def test_median_dropout_takes_the_median():
+    pairs = [(23.8, 17.0)] * 12
+    pairs[0] = (30.0, 17.0)  # an hour with the windows open
+    pairs[1] = (18.0, 17.0)
+    assert round(controller.median_dropout(pairs), 2) == 6.8
+
+
+def test_feedforward_prefers_settled_dropout():
+    # The AC sensor says 25 while the room is 28 (bias 3.0 -> 23.0), but the
+    # settled gap says the room sits 6.8 above whatever we write -> 19.2.
+    adapter = FakeAdapter(setpoint=26, current_temperature=25.0, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (28.0, 0.0), target=26)
+    controller.learned_dropout = 6.8
+    enable(controller)
+    tick(controller)
+    assert adapter.writes == [19.0]
+
+
+def test_dropout_discarded_when_absurd():
+    # A gap no steady room could show falls back to the AC-sensed bias.
+    adapter = FakeAdapter(setpoint=26, current_temperature=25.0, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (28.0, 0.0), target=26)
+    controller.learned_dropout = 25.0
+    enable(controller)
+    tick(controller)
+    assert adapter.writes == [23.0]
+
+
+def test_dropout_positions_heating():
+    # Heating with an over-reading sensor: the room sits *below* the setpoint,
+    # so the gap is negative and the setpoint must go above the target.
+    adapter = FakeAdapter(setpoint=24, current_temperature=22.0, hvac_mode="heat")
+    controller, _ = make_controller(adapter, lambda: (20.0, 0.0), target=20)
+    controller.learned_dropout = -2.0
+    enable(controller)
+    tick(controller)
+    assert adapter.writes == [22.0]
+
+
+def test_live_dropout_overrides_learned():
+    adapter = FakeAdapter(setpoint=26, current_temperature=25.0, hvac_mode="cool")
+    controller, _ = make_controller(adapter, lambda: (28.0, 0.0), target=26)
+    controller.learned_dropout = 2.0
+    controller._dropout_live.append(6.8)
+    assert controller.dropout_live == 6.8
+    enable(controller)
+    tick(controller)
+    assert adapter.writes == [19.0]
+
+
+def test_idle_unit_is_not_learned_from():
+    # Merely idle: the unit is letting the room drift inside its own dead
+    # zone, so its setpoint would teach a gap far too small to hold comfort.
+    adapter = FakeAdapter(
+        setpoint=22.0,
+        current_temperature=24.0,
+        hvac_mode="cool",
+        hvac_action="idle",
+    )
+    controller, _ = make_controller(
+        adapter, lambda: (23.8, 0.0), target=24, feedforward=False
+    )
+    enable(controller)
+    tick(controller)
+    assert controller.status == STATUS_IDLE
+    assert controller.dropout_live is None
+
+
+def test_idle_observes_settled_dropout():
+    # Nothing was written: the AC already sits at 17 and the room is at
+    # target, so the gap is a genuine equilibrium from the first tick.
+    adapter = FakeAdapter(setpoint=17.0, current_temperature=19.0, hvac_mode="cool")
+    controller, _ = make_controller(
+        adapter, lambda: (23.8, 0.0), target=24, feedforward=False
+    )
+    enable(controller)
+    tick(controller)
+    assert controller.status == STATUS_IDLE
+    assert controller.dropout_live == 6.8
+
+
+def test_dropout_not_observed_before_the_setpoint_settles():
+    adapter = FakeAdapter(setpoint=19.0, current_temperature=19.0, hvac_mode="cool")
+    sensor = {"value": 26.0}
+    controller, clock = make_controller(
+        adapter, lambda: (sensor["value"], 0.0), target=24, feedforward=False
+    )
+    enable(controller)
+    tick(controller)  # steps the setpoint down to 18.5
+    assert adapter.writes == [18.5]
+    sensor["value"] = 23.8
+    clock["t"] += 60
+    tick(controller)  # median filter still reads 24.9, nothing to observe
+    clock["t"] += 60
+    tick(controller)  # comfort reached, but only 2 minutes after the write
+    assert controller.status == STATUS_IDLE
+    assert controller.dropout_live is None
+    clock["t"] += 600  # settled long enough now
+    tick(controller)
+    assert controller.dropout_live == 5.3
 
 
 # -- restart resume ---------------------------------------------------------

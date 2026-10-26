@@ -13,6 +13,7 @@ from datetime import timedelta
 import homeassistant.util.dt as dt_util
 from homeassistant.components.climate import (
     ATTR_CURRENT_TEMPERATURE,
+    ATTR_HVAC_ACTION,
     ATTR_MAX_TEMP,
     ATTR_MIN_TEMP,
     ATTR_TARGET_TEMP_STEP,
@@ -103,6 +104,12 @@ class HAClimateAdapter:
     def hvac_mode(self) -> str | None:
         state = self._state
         return state.state if state else None
+
+    @property
+    def hvac_action(self) -> str | None:
+        """What the unit is doing (cooling/idle/...), not what it is set to."""
+        state = self._state
+        return state.attributes.get(ATTR_HVAC_ACTION) if state else None
 
     @property
     def min_temp(self) -> float | None:

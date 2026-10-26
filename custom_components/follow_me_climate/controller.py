@@ -18,6 +18,14 @@ bias is noisy at start-up, so the HA layer may pre-load a learned_bias (a
 median over recent runtime history) and primed readings; both are optional
 and the loop behaves exactly the same without them.
 
+Some units report a temperature that simply tracks their own setpoint (a
+supply-air or coil-sited thermistor), which defeats the AC-sensed bias: it
+collapses to ~0 however far the room is from target, and the loop then has to
+walk the setpoint down half a degree at a time. The settled *dropout* — the
+gap between the reference temperature and the setpoint that held it — measures
+the same trade from the other side and is what the feedforward prefers when
+it is known.
+
 Restart resume: the HA layer stages entity-restored convergence state
 (written setpoint, enable-time default, wall-clock stamp of the last action)
 and applies it right after enable(), so a reload continues where it left
@@ -60,6 +68,11 @@ from .const import (
     DEFAULT_SENSOR_TIMEOUT,
     DEFAULT_STEP,
     DEFAULT_TARGET,
+    DROPOUT_LIVE_SAMPLES,
+    DROPOUT_MAX_ABS,
+    DROPOUT_MIN_SAMPLES,
+    DROPOUT_SETTLE_SECONDS,
+    HVAC_ACTIONS_WORKING,
     HVAC_COOL,
     HVAC_HEAT,
     POWER_GATE_HOLDING,
@@ -90,19 +103,37 @@ from .const import (
 _EPS = 0.05
 
 
-def median_bias(pairs: list[tuple[float, float]]) -> float | None:
-    """Median of (reference, AC-sensed) pairs; None when evidence is thin.
+def _median_gap(
+    pairs: list[tuple[float, float]], minimum: int
+) -> float | None:
+    """Median of (reference, other) differences; None when evidence is thin.
 
     The median matches the loop's spike-rejecting philosophy; a stray hour
     with windows flung open cannot drag the estimate.
     """
-    if len(pairs) < BIAS_MIN_SAMPLES:
+    if len(pairs) < minimum:
         return None
-    diffs = sorted(ref - ac for ref, ac in pairs)
+    diffs = sorted(ref - other for ref, other in pairs)
     n = len(diffs)
     if n % 2 == 1:
         return diffs[n // 2]
     return (diffs[n // 2 - 1] + diffs[n // 2]) / 2
+
+
+def median_bias(pairs: list[tuple[float, float]]) -> float | None:
+    """Median of (reference, AC-sensed) pairs — how far the AC sensor lies."""
+    return _median_gap(pairs, BIAS_MIN_SAMPLES)
+
+
+def median_dropout(pairs: list[tuple[float, float]]) -> float | None:
+    """Median of settled (reference, setpoint) pairs — the room-vs-setpoint gap.
+
+    This is the position the setpoint has to sit at to hold the target, which
+    is not the same thing as the AC-sensed bias: on units whose reported
+    temperature tracks their own setpoint, that bias collapses to ~0 while
+    the room can sit many degrees above the setpoint.
+    """
+    return _median_gap(pairs, DROPOUT_MIN_SAMPLES)
 
 
 def _plausible_sp(value) -> float | None:
@@ -110,6 +141,20 @@ def _plausible_sp(value) -> float | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
     if not SP_ABS_MIN <= value <= SP_ABS_MAX:
+        return None
+    return float(value)
+
+
+def _plausible_dropout(value) -> float | None:
+    """A room-vs-setpoint gap beyond the plausible band is not a steady room.
+
+    Guards both the learned value and the live observations: a badly mixed
+    room or a mis-wired reference sensor can otherwise produce a gap that
+    would slam the setpoint into a bound on the very first write.
+    """
+    if not _is_number(value):
+        return None
+    if abs(float(value)) > DROPOUT_MAX_ABS:
         return None
     return float(value)
 
@@ -204,6 +249,10 @@ class FollowMeController:
         self.learned_bias: float | None = None
         # How many (reference, AC-sensed) pairs that estimate rests on.
         self.bias_samples: int | None = None
+        # Settled room-vs-setpoint gap: learned from recorder history, then
+        # refreshed by observations taken while the loop sits idle at target.
+        self.learned_dropout: float | None = None
+        self.dropout_samples: int | None = None
         # Last rejected write (device/service error) and its parking timer.
         self.write_error: str | None = None
         self.write_failures = 0
@@ -219,6 +268,7 @@ class FollowMeController:
         self.applied_options: dict = {}
 
         self._readings: deque[float] = deque(maxlen=5)
+        self._dropout_live: deque[float] = deque(maxlen=DROPOUT_LIVE_SAMPLES)
         self._power_readings: deque[float] = deque(maxlen=5)
         self._power_baseline: float | None = None
         self._power_write_ts: float | None = None
@@ -272,6 +322,12 @@ class FollowMeController:
     def power_baseline(self) -> float | None:
         """Wattage snapshotted at the moment of the last setpoint write."""
         return self._power_baseline
+
+    @property
+    def dropout_live(self) -> float | None:
+        """Median of the settled room-vs-setpoint gaps seen while idling."""
+        live = self._median(self._dropout_live)
+        return None if live is None else round(live, 2)
 
     def _effective_bounds(self) -> tuple[float, float]:
         """Configured clamp bounds, intersected with the AC's real range.
@@ -341,6 +397,43 @@ class FollowMeController:
         ):
             return learned
         return instant
+
+    def _dropout_for(self) -> float | None:
+        """Pick the positioning gap: freshest settled observation, else history.
+
+        The live observation wins because it was measured against the room as
+        it is now; the recorder value only has to bridge the gap until the
+        first idle period after a restart.
+        """
+        live = self.dropout_live
+        if live is not None:
+            return live
+        return _plausible_dropout(self.learned_dropout)
+
+    def _observe_dropout(self, ref: float) -> None:
+        """Record the settled room-vs-setpoint gap while sitting at target.
+
+        Only reachable from the idle branch (comfort already reached) and only
+        once the setpoint has been unchanged for DROPOUT_SETTLE_SECONDS, so
+        the sample is an equilibrium rather than a step still in flight.
+        """
+        if self._written_sp is None:
+            return
+        if (
+            self.last_action_ts is not None
+            and self._now() - self.last_action_ts < DROPOUT_SETTLE_SECONDS
+        ):
+            return
+        # A unit that is merely idle is not holding the room — it is letting
+        # it drift inside its own thermostat's dead zone, and its setpoint
+        # would teach us a gap far too small. Unknown actions (adapters that
+        # do not report one) are accepted rather than blocking the estimate.
+        action = getattr(self._adapter, "hvac_action", None)
+        if action is not None and action not in HVAC_ACTIONS_WORKING:
+            return
+        gap = _plausible_dropout(ref - self._written_sp)
+        if gap is not None:
+            self._dropout_live.append(gap)
 
     # -- power gating ------------------------------------------------------
 
@@ -723,14 +816,22 @@ class FollowMeController:
             ac_temp = self._adapter.current_temperature
             ff_sp = cur_sp if cur_sp is not None else self._snap(cfg.target)
             if cfg.feedforward and ref is not None:
-                # Person = AC sensor + bias, so drive the AC sensor to
-                # target - bias. Same formula for cooling and heating.
-                # Prefer a learned steady bias: the instant one samples
-                # whatever transient the room was in at start-up, and a
-                # learned bias positions even without an AC-sensed temp.
-                bias = self._bias_for(None if ac_temp is None else ref - ac_temp)
-                if bias is not None:
-                    ff_sp = self._snap(cfg.target - bias)
+                # Preferred: the settled gap between the room and the setpoint
+                # we write. It answers "where must the setpoint sit for the
+                # room to hold the target?" directly, and survives units whose
+                # reported temperature merely tracks their own setpoint.
+                dropout = self._dropout_for()
+                if dropout is not None:
+                    ff_sp = self._snap(cfg.target - dropout)
+                else:
+                    # Fallback: Person = AC sensor + bias, so drive the AC
+                    # sensor to target - bias. Same formula for both modes.
+                    # Prefer a learned steady bias: the instant one samples
+                    # whatever transient the room was in at start-up, and a
+                    # learned bias positions even without an AC-sensed temp.
+                    bias = self._bias_for(None if ac_temp is None else ref - ac_temp)
+                    if bias is not None:
+                        ff_sp = self._snap(cfg.target - bias)
             self._written_sp = ff_sp
             if cur_sp is None or abs(ff_sp - cur_sp) > _EPS:
                 if not cfg.dry_run:
@@ -762,6 +863,9 @@ class FollowMeController:
             if self._power_reader is not None:
                 self._momentum_since = None
                 self.power_gate = POWER_GATE_OPEN
+            # A settled idling loop is the best evidence of the gap that
+            # holds the target; keep the positioning estimate current.
+            self._observe_dropout(ref)
             self.status = STATUS_IDLE
             self.status_detail = f"reference {ref:.1f}, target {cfg.target:.1f}"
             self._notify()
