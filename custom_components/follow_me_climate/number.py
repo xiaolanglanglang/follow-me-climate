@@ -85,11 +85,16 @@ class FollowMeNumber(NumberEntity):
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)})
 
     async def async_set_native_value(self, value: float) -> None:
-        setattr(self._controller.config, self._CONFIG_ATTR[self._key], value)
         self._attr_native_value = value
-        self._controller.notify()
+        if self._key == CONF_TARGET:
+            await self._controller.update_target(value)
+        else:
+            setattr(self._controller.config, self._CONFIG_ATTR[self._key], value)
+            self._controller.notify()
         # Persist so the value survives restarts; runtime-only key, so the
-        # update listener hot-applies it instead of reloading the entry.
+        # update listener hot-applies it instead of reloading the entry. A
+        # target change also gets one immediate evaluation, while the normal
+        # interval and safety gates still control whether the AC is written.
         self._hass.config_entries.async_update_entry(
             self._entry, options={**self._entry.options, self._key: value}
         )

@@ -12,6 +12,7 @@
 
 - 启动时做一次**前馈定位**（冷热模式同公式：`设定值 = 目标 − 偏差`，偏差 = 参考温度 − 空调自感温度）；有 recorder 历史时会改用近 24 小时**运行时段偏差中值**（更稳，详见下节「历史数据加速收敛」）；
 - 之后每周期检查误差，超出死区就朝正确方向微调一步；
+- 修改目标温度后立即重新判断误差，但实际写入仍受调节间隔、死区与安全机制约束；
 - 步长小、周期长、死区宽，压缩机平滑升降频，不会频繁启停。
 
 ```
@@ -93,7 +94,7 @@ HACS → 前端仓库（自定义仓库）→ 添加 `https://github.com/xiaolan
 | 实体 | 说明 |
 |---|---|
 | `switch.<名称>` | 总开关（关闭时恢复默认设定值） |
-| `number.<名称>_target_temperature` | 目标温度，运行时可调（滑块） |
+| `number.<名称>_target_temperature` | 目标温度，运行时可调（滑块）；修改后立即检查误差，实际写入仍受调节间隔约束 |
 | `number.<名称>_step` | 调节步长，运行时可调（滑块） |
 | `sensor.<名称>_status` | 状态：`idle` / `adjusting` / `manual_pause` / `sensor_lost` / `inactive`（属性里有 detail、参考温度、已下发设定值、默认设定值、最近动作及其壁钟时间、`power_w`/`power_baseline_w`/`power_gate`、`learned_bias`/`bias_samples`、`effective_min_sp`/`effective_max_sp`、`write_error`/`write_failures`） |
 | `sensor.<名称>_offset` | 已施加偏移（当前下发设定值 − 目标温度） |

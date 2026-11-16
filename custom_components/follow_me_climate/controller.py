@@ -41,6 +41,7 @@ and it disarms itself whenever the power signal is missing or stale.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import time
 from collections import deque
@@ -284,6 +285,7 @@ class FollowMeController:
         # Entity-restored convergence state, held until apply_staged_restore.
         self._pending_restore: dict | None = None
         self._listeners: list[Callable[[], None]] = []
+        self._tick_lock = asyncio.Lock()
 
     # -- plumbing ----------------------------------------------------------
 
@@ -599,6 +601,17 @@ class FollowMeController:
         self.applied_options = dict(options)
         self._notify()
 
+    async def update_target(self, target: float) -> None:
+        """Apply a user target change and evaluate it immediately.
+
+        The normal cadence and safety gates still decide whether a setpoint
+        write is allowed; this only removes the wait for the next poll.
+        """
+        async with self._tick_lock:
+            self.config.target = float(target)
+            self._notify()
+            await self._tick_once()
+
     # -- history priming and restart resume ---------------------------------
 
     def prime_readings(self, values: list[float]) -> None:
@@ -704,6 +717,11 @@ class FollowMeController:
     # -- control loop ------------------------------------------------------
 
     async def tick(self) -> None:
+        """Run one control pass, serialized against timer and entity events."""
+        async with self._tick_lock:
+            await self._tick_once()
+
+    async def _tick_once(self) -> None:
         """One control pass; the platform timer calls this every minute."""
         if not self.enabled:
             return

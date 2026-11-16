@@ -177,6 +177,63 @@ def test_rate_gate_defers_adjustment():
     assert "next adjustment" in controller.status_detail
 
 
+def test_target_change_triggers_one_immediate_step():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    sensor = {"value": 26.0}
+    controller, _ = make_controller(
+        adapter, lambda: (sensor["value"], 0.0), target=26, feedforward=False
+    )
+    enable(controller)
+    tick(controller)
+    assert adapter.writes == []
+
+    # The target update itself performs a control pass. The AC moves by one
+    # step from its current setpoint, not by a fresh feedforward calculation.
+    sensor["value"] = 27.5
+    asyncio.run(controller.update_target(25.0))
+    assert adapter.writes == [25.5]
+    assert controller.applied_setpoint == 25.5
+
+
+def test_target_change_inside_deadband_does_not_write():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    controller, _ = make_controller(
+        adapter, lambda: (25.5, 0.0), target=26, feedforward=False
+    )
+    enable(controller)
+    tick(controller)
+
+    asyncio.run(controller.update_target(25.0))
+    assert adapter.writes == []
+    assert controller.status == STATUS_IDLE
+
+
+def test_target_change_respects_rate_gate():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    controller, _ = make_controller(
+        adapter, lambda: (28.0, 0.0), target=26, feedforward=False
+    )
+    enable(controller)
+    tick(controller)
+    assert adapter.writes == [25.5]
+
+    asyncio.run(controller.update_target(24.0))
+    assert adapter.writes == [25.5]
+    assert controller.status == STATUS_ADJUSTING
+    assert "next adjustment" in controller.status_detail
+
+
+def test_target_change_while_disabled_only_updates_config():
+    adapter = FakeAdapter(setpoint=26, current_temperature=26, hvac_mode="cool")
+    controller, _ = make_controller(
+        adapter, lambda: (28.0, 0.0), target=26, feedforward=False
+    )
+
+    asyncio.run(controller.update_target(24.0))
+    assert controller.config.target == 24.0
+    assert adapter.writes == []
+
+
 def test_manual_override_pauses_then_adopts():
     adapter = FakeAdapter(setpoint=26, current_temperature=27, hvac_mode="cool")
     controller, clock = make_controller(
